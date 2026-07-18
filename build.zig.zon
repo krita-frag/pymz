@@ -1,0 +1,22 @@
+.{
+    .name = .pymz_workspace,
+    .version = "0.1.0",
+    .fingerprint = 0x8f47120d4456d527,
+    .minimum_zig_version = "0.16.0-dev.2979+e93834410",
+    .dependencies = .{
+        .pymz = .{ .path = "pymz" },
+        .@"pymz-build" = .{ .path = "pymz-build" },
+        .examples = .{ .path = "examples" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "README.md",
+        "setup.py",
+        "pymz",
+        "pymz-build",
+        "examples",
+        "tools/pymz_tool",
+        "tools/pyproject.toml",
+    },
+}

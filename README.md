@@ -1,100 +1,87 @@
-# Lightweight Python bindings for zig
+# pymz
 
-py.zig provides a _lightweight_ interface for creating python extensions in zig. 
+`pymz` is a Zig-first toolkit for building Python extension modules with a
+small public API and a compatibility-heavy runtime.
 
-> Moved to https://codeberg.org/frmdstryr/py.zig
+It is designed for projects that need:
 
-It is intended to be used with [setuptools-zig](https://pypi.org/project/setuptools-zig/) by
-simply cloning or copying `py.zig` into your python project, adding an `Extension` entry 
-in your `setup.py`, and then using `const py = @import("py.zig");`  in your extensions 
-source to define the python module. 
-
-
-
-```py
-from setuptools import Extension, setup
-
-setup(
-    name='pyzigtest',
-    version='0.1.0',
-    python_requires='>=3.10',
-    build_zig=True,
-    ext_modules=[
-        Extension(
-            'pyzigtest',
-            sources=[
-                'src/pyzigtest.zig'
-            ],
-            extra_compile_args=["-ODebug"] # or -OReleaseFast, etc..
-        )
-    ],
-    setup_requires=['setuptools-zig'],
-)
-```
-
-See the [example](example/) for a complete example.
-
-## Why 
-
-py.zig is designed to be a much lighter alternative to something like [ziggy-pydust](https://github.com/spiraldb/ziggy-pydust).
+- CPython 2.7 through 3.x support.
+- Per-`python-version` / per-platform / per-ABI wheel artifacts.
+- Ordinary Zig `fn` and `struct` declarations, with comptime reflection
+  generating the C API glue.
+- A simple developer workflow instead of a large handwritten binding layer.
 
 ## Design
 
-For each builtin python type `py.zig` defines an equivalent `extern struct` that embeds a 
-single field `impl` with the underlying python type. For examle a tuple is defined as:
+The project is organized around four goals:
+
+1. Compatibility: Python 2.7 and 3.x remain first-class targets.
+2. Multi-distribution: each Python version and platform gets its own artifact.
+3. Extensibility: Zig code stays Zig code; the binding layer is generated.
+4. Usability: the public API is intentionally small and explicit.
+
+The repository is split into the core toolkit and a standalone example:
+
+- `pymz/` contains the Zig runtime and public API package.
+- `pymz-build/` contains the reusable Zig build helper package.
+- `tools/pymz_tool/` contains the Python build tool, wheel writer, and scaffold CLI.
+- `setup.py` installs the `pymz-tool` Python build tool for legacy Python packaging.
+- `build.zig` is the workspace build file.
+- `examples/` contains standalone example packages.
+- `examples/jsonz/` is an independent `jsonz` project with its own `setup.py`,
+  `build.zig`, `pymz/`, `pymz-build/`, `src/`, and `tests/`.
+
+## Example
 
 ```zig
-// c-import Python.h
-pub const c = @cImport({
-    @cDefine("PY_SSIZE_T_CLEAN", "1");
-    @cInclude("Python.h");
-});
+const pymz = @import("pymz");
 
-// ... 
+fn addImpl(a: i64, b: i64) pymz.Result(i64) {
+    return @intCast(a + b);
+}
 
-pub const Tuple = extern struct {
-    // The underlying python structure
-    impl: c.PyTupleObject,
+pub const pymz_module = pymz.module("demo", .{
+    .__pymz_param_names__ = .{
+        .add = "a, b",
+    },
+    .add = pymz.function(addImpl, "Add two integers."),
+}, null, "Demo module.");
 
-    // Import the object protocol
-    pub usingnamespace ObjectProtocol(@This());
-
-    // Import the SequenceProtocol
-    pub usingnamespace SequenceProtocol(@This());
-        
-    // Some more tuple methods here...
-};
+comptime {
+    _ = pymz_module;
+}
 ```
 
-Since these types have the same memory representation as the c-equivalent you can safetly use `@ptrCast`
-and pass them to any functions (C/C++, or whatever) that take a tuple object. 
-
-You can also access any members of the python type using `impl`, directly. For example the `Type` 
-can get the name like this:
+Protocol hooks can be attached explicitly:
 
 ```zig
-pub const Type = extern struct {
-    // The underlying python structure
-    impl: c.PyTypeObject,
-    
-    // ... 
-    
-    // Return the name of this type
-    pub inline fn className(self: *Type) [:0]const u8 {
-        return std.mem.span(self.impl.tp_name);
-    }
-};
+pub const __repr__ = pymz.Repr(reprImpl);
 ```
 
-However it is generally recommended to use public C-API functions as is done with the wrappers in `py.zig`.
+## Build
 
+Install the `pymz-tool` build tool from the repository root:
 
-## Status
+```bash
+python setup.py install
+```
 
-This is currently very alpha status and is undergoing breaking changes to functions but the 
-basic design concept is unlikely to change.
+Build and test the standalone `jsonz` example:
 
+```bash
+cd examples/jsonz
+python setup.py build_ext --inplace
+PYTHONPATH=zig-out/lib python -m pytest tests -q
+```
 
-## Plans
+Build a `jsonz` wheel from the example project:
 
-Auto generate bindings...
+```bash
+cd examples/jsonz
+python -m pymz_tool build --module jsonz --version 0.1.0 --release -o dist
+```
+
+## Python 2.7
+
+Python 2.7 support is kept in the build matrix and validated through the Nix
+shell defined in `flake.nix`.

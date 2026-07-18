@@ -1,19 +1,106 @@
 name: CI
-on: [push]
+on: [push, pull_request]
+
 jobs:
-  test:
+  build-wheel:
+    name: Build & test wheel (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ['3.8', '3.9', '3.10', '3.11', '3.12', '3.13', '3.14']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.16.0-dev.2979+e93834410
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install pymz-tool build tool and test dependencies
+        run: pip install -e tools/ pytest
+
+      - name: Build jsonz wheel
+        run: cd examples/jsonz && python -m pymz_tool build --module jsonz --version 0.1.0 --release -o dist
+
+      - name: Build through setup.py
+        run: |
+          python setup.py --name
+          python examples/jsonz/setup.py build_ext --inplace
+
+      - name: Verify wheel contents
+        shell: bash
+        run: |
+          python - <<'PY'
+          import importlib.machinery
+          import sysconfig
+          import zipfile
+          from pathlib import Path
+          
+          wheel_path = next(Path("examples/jsonz/dist").glob("*.whl"))
+          ext_suffixes = set(importlib.machinery.EXTENSION_SUFFIXES)
+          ext_suffix = sysconfig.get_config_var("EXT_SUFFIX")
+          if ext_suffix:
+              ext_suffixes.add(ext_suffix)
+          
+          with zipfile.ZipFile(wheel_path) as zf:
+              names = zf.namelist()
+          
+          extensions = [
+              name for name in names
+              if any(name.endswith(suffix) for suffix in ext_suffixes)
+          ]
+          assert len(extensions) == 1, extensions
+          assert "jsonz.pyi" in names, names
+          assert "py.typed" in names, names
+          PY
+
+      - name: Install wheel and run tests
+        shell: bash
+        run: |
+          pip install examples/jsonz/dist/*.whl
+          python -m pytest examples/jsonz/tests/ -v
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pymz-wheel-${{ matrix.os }}
+          path: examples/jsonz/dist/*.whl
+
+  nix-build:
+    name: Nix Flake build (Python 3 + Py2.7)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - name: Install dependencies
-        run: |
-            sudo snap install --beta --classic zig
-            pip install pytest
-            zig version
-      - name: Run zig tests
-        run: zig test py.zig -I/usr/include -I$(python -c "import sysconfig;print(sysconfig.get_path(\"include\"))") -L$(python -c "import sysconfig;print(sysconfig.get_config_var(\"LIBDIR\"))") -lpython$(python -c "import sysconfig;print(sysconfig.get_python_version())")
-      - name: Build example
-        run: pip install ./example
-      - name: Run pytests
-        run: pytest tests
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v14
 
+      - name: Build & test example (Python 3)
+        run: |
+          nix develop --command bash -c '
+            cd examples/jsonz
+            zig build example
+            PYTHONPATH=zig-out/lib python -m pytest tests/ -v
+            if zig build example -Dpython-version=9.9; then
+              echo "expected missing python version to fail"
+              exit 1
+            fi
+          '
+
+      - name: Build example for Python 2.7
+        env:
+          NIXPKGS_ALLOW_INSECURE: 1
+        run: |
+          nix develop .#py27 --impure --command bash -c '
+            cd examples/jsonz
+            zig build example -Dpython-version=2.7
+            python2.7 -c "import sys; sys.path.insert(0, \"zig-out/lib\"); import jsonz; assert jsonz.validate_json(\"{}\") is True"
+            python2.7 setup.py build_ext --inplace
+            python2.7 -c "import sys; sys.path.insert(0, \"zig-out/lib\"); import jsonz; assert jsonz.validate_json(\"{}\") is True"
+          '
