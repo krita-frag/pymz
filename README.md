@@ -1,37 +1,34 @@
 # pymz
 
-`pymz` is a Zig-first toolkit for building Python extension modules with a
-small public API and a compatibility-heavy runtime.
+用 Zig 写 Python 扩展：编译期反射自动生成 CPython C API 胶水代码，
+支持 CPython 2.7 ~ 3.14，直接产出 wheel。
 
-It is designed for projects that need:
+## 前置依赖
 
-- CPython 2.7 through 3.x support.
-- Per-`python-version` / per-platform / per-ABI wheel artifacts.
-- Ordinary Zig `fn` and `struct` declarations, with comptime reflection
-  generating the C API glue.
-- A simple developer workflow instead of a large handwritten binding layer.
+- **Zig** `0.16.0-dev.2979+e93834410`
+- **Python** 2.7 / 3.8+
+- **setuptools** ≥ 42
 
-## Design
+## 快速开始
 
-The project is organized around four goals:
+```bash
+# 1. 构建 pymz-tool
+cd pymz-tool && zig build
 
-1. Compatibility: Python 2.7 and 3.x remain first-class targets.
-2. Multi-distribution: each Python version and platform gets its own artifact.
-3. Extensibility: Zig code stays Zig code; the binding layer is generated.
-4. Usability: the public API is intentionally small and explicit.
+# 2. 构建 jsonz 示例 wheel
+cd ../examples/jsonz
+PYMZ_PYTHON=$(which python3) \
+    ../../pymz-tool/zig-out/bin/pymz-tool build \
+        --module _jsonz --distribution jsonz --version 0.1.0 \
+        --zig-target example --package-dir python --release -o dist
 
-The repository is split into the core toolkit and a standalone example:
+# 3. 安装并测试
+pip install --force-reinstall --no-deps dist/*.whl
+python -c "import jsonz; print(jsonz.validate_json('[1, 2, 3]'))"  # => True
+pytest tests/
+```
 
-- `pymz/` contains the Zig runtime and public API package.
-- `pymz-build/` contains the reusable Zig build helper package.
-- `tools/pymz_tool/` contains the Python build tool, wheel writer, and scaffold CLI.
-- `setup.py` installs the `pymz-tool` Python build tool for legacy Python packaging.
-- `build.zig` is the workspace build file.
-- `examples/` contains standalone example packages.
-- `examples/jsonz/` is an independent `jsonz` project with its own `setup.py`,
-  `build.zig`, `pymz/`, `pymz-build/`, `src/`, and `tests/`.
-
-## Example
+## 写一个扩展
 
 ```zig
 const pymz = @import("pymz");
@@ -41,47 +38,56 @@ fn addImpl(a: i64, b: i64) pymz.Result(i64) {
 }
 
 pub const pymz_module = pymz.module("demo", .{
-    .__pymz_param_names__ = .{
-        .add = "a, b",
-    },
+    .__pymz_param_names__ = .{ .add = "a, b" },
     .add = pymz.function(addImpl, "Add two integers."),
 }, null, "Demo module.");
 
-comptime {
-    _ = pymz_module;
-}
+comptime { _ = pymz_module; }
 ```
 
-Protocol hooks can be attached explicitly:
+完整示例见 [`examples/jsonz`](examples/jsonz)。
 
-```zig
-pub const __repr__ = pymz.Repr(reprImpl);
-```
-
-## Build
-
-Install the `pymz-tool` build tool from the repository root:
+## `pymz-tool` 命令
 
 ```bash
-python setup.py install
+# 为当前 Python 构建单个 wheel
+pymz-tool build --module _foo --distribution foo --version 0.1.0 \
+    --zig-target foo --package-dir python --release -o dist
+
+# 为多个 Python 版本批量构建
+pymz-tool matrix --module _foo --distribution foo --version 0.1.0 \
+    --python-versions 3.9,3.10,3.11,3.12 --release -o dist
 ```
 
-Build and test the standalone `jsonz` example:
+常用参数：`--module`、`--distribution`、`--package-dir`、`--version`、
+`--release`、`--zig-target`、`--python-versions`（matrix 必填）、
+`-o/--out`。环境变量 `PYMZ_PYTHON` 指定目标解释器。运行
+`pymz-tool --help` 查看完整列表。
+
+## 公共 API
+
+| 名称 | 说明 |
+| --- | --- |
+| `pymz.module(name, members, exc, doc)` | 声明 Python 模块。 |
+| `pymz.function(fn, doc)` | 暴露 Zig `fn` 为 Python 函数。 |
+| `pymz.kwFunction(fn, doc)` | 同上，支持关键字参数。 |
+| `pymz.class("Name", spec, doc)` | 把 Zig struct 暴露为 Python 类。 |
+| `pymz.exception(.value_error, "msg")` | 声明自定义异常。 |
+| `pymz.Result(T)` | 返回类型，等价于 `!T`。 |
+| `pymz.Value` | 不透明的 `PyObject *`。 |
+| `pymz.none/boolean/integer/floating/string` | 构造 Python 对象。 |
+| `pymz.list(n)` / `pymz.dict()` | 构造容器。 |
+
+详见 [`pymz/src/api.zig`](pymz/src/api.zig)。
+
+## 测试
 
 ```bash
-cd examples/jsonz
-python setup.py build_ext --inplace
-PYTHONPATH=zig-out/lib python -m pytest tests -q
+cd pymz-tool && zig build test --summary all   # Zig 单元测试
+python -m pytest pymz_setup/tests/ -v           # Python 单元测试
+python -m pytest examples/jsonz/tests/ -v       # 端到端测试
 ```
 
-Build a `jsonz` wheel from the example project:
+## 许可证
 
-```bash
-cd examples/jsonz
-python -m pymz_tool build --module jsonz --version 0.1.0 --release -o dist
-```
-
-## Python 2.7
-
-Python 2.7 support is kept in the build matrix and validated through the Nix
-shell defined in `flake.nix`.
+MIT。

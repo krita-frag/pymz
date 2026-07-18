@@ -1,11 +1,14 @@
-import jsonz
 import inspect
-from pathlib import Path
+import os
+import sys
 
 import pytest
 
 
-ROOT = Path(__file__).resolve().parents[1]
+import jsonz
+
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def test_parse_json_primitives():
@@ -97,16 +100,14 @@ def test_json_error_attribute():
     assert issubclass(jsonz.JsonError, ValueError)
 
 
-def test_signature_for_json_path_method():
-    assert str(inspect.signature(jsonz.JsonPath.find)) == "(self, root, /)"
-
-
 def test_json_path_repr():
     assert repr(jsonz.JsonPath("a.b")) == "JsonPath"
 
 
 def test_generated_pyi_contains_public_api_signatures():
-    stub = (ROOT / "zig-out" / "lib" / "jsonz.pyi").read_text()
+    stub_path = os.path.join(ROOT, "python", "jsonz", "_jsonz.pyi")
+    with open(stub_path, "r") as f:
+        stub = f.read()
 
     assert "def parse_json(text: str, /) -> Any: ..." in stub
     assert "def dump_json(obj: Any, indent: int | None = None) -> str: ..." in stub
@@ -114,3 +115,11 @@ def test_generated_pyi_contains_public_api_signatures():
     assert "class JsonError(Exception):" in stub
     assert "def __init__(self, pattern: str, /) -> None: ..." in stub
     assert "def find(self, root: Any, /) -> Any: ..." in stub
+
+
+@pytest.mark.skipif(
+    sys.version_info[0] < 3,
+    reason="inspect.signature is not available on Python 2",
+)
+def test_signature_for_json_path_method():
+    assert str(inspect.signature(jsonz.JsonPath.find)) == "(self, root, /)"

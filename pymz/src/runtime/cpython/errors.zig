@@ -42,6 +42,10 @@ pub inline fn runtimeError(comptime msg: [:0]const u8, args: anytype) Error!void
     return errorFormat(c.PyExc_RuntimeError, msg, args);
 }
 
+pub inline fn overflowError(comptime msg: [:0]const u8, args: anytype) Error!void {
+    return errorFormat(c.PyExc_OverflowError, msg, args);
+}
+
 pub inline fn errorFormat(exc: *c.PyObject, comptime format: []const u8, args: anytype) Error!void {
     if (comptime args.len == 0) {
         c.PyErr_SetString(exc, @ptrCast(format));

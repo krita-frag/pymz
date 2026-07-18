@@ -1,0 +1,16 @@
+.{
+    .name = .pymz_tool,
+    .version = "0.1.0",
+    .fingerprint = 0x5e99e795b5993390,
+    .minimum_zig_version = "0.16.0-dev.2979+e93834410",
+    .dependencies = .{
+        .pymz = .{ .path = "../pymz" },
+        .@"pymz-build" = .{ .path = "../pymz-build" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "templates",
+    },
+}

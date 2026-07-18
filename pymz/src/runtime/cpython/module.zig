@@ -205,9 +205,17 @@ pub fn pyfn_kw(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject, ?*c.PyObj
     const Fields = InnerInfo.@"struct".fields;
 
     const S = struct {
-        fn releaseFields(value: *InnerT, count: usize) void {
+        // Per-field initialization flags. Tracking a contiguous prefix via a
+        // single counter is insufficient when fields are filled out of order
+        // (e.g. a default at index 0 followed by a keyword arg at index 1):
+        // doing so would skip releasing fields that were actually converted
+        // via `convert.fromPy`. We instead record exactly which fields have
+        // been assigned so the cleanup path can release precisely those.
+        const InitFlags = [Fields.len]bool;
+
+        fn releaseFields(value: *InnerT, init: *const InitFlags) void {
             inline for (Fields, 0..) |field, i| {
-                if (i < count) {
+                if (init[i]) {
                     convert.releaseValue(&@field(value, field.name));
                 }
             }
@@ -266,7 +274,7 @@ pub fn pyfn_kw(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject, ?*c.PyObj
             }
 
             var value: InnerT = undefined;
-            var assigned_count: usize = 0;
+            var initialized: InitFlags = [_]bool{false} ** Fields.len;
 
             inline for (Fields, 0..) |field, i| {
                 const is_optional = @typeInfo(field.type) == .optional;
@@ -276,7 +284,7 @@ pub fn pyfn_kw(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject, ?*c.PyObj
                     // Positional argument
                     const py_item = args_tuple.?.get(i) orelse {
                         errors.typeError("missing positional argument {d}", .{i + 1}) catch {};
-                        releaseFields(&value, assigned_count);
+                        releaseFields(&value, &initialized);
                         return null;
                     };
                     if (is_optional and py_item.isNone()) {
@@ -285,17 +293,17 @@ pub fn pyfn_kw(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject, ?*c.PyObj
                         const inner_type = @typeInfo(field.type).optional.child;
                         @field(value, field.name) = convert.fromPy(inner_type, py_item) catch {
                             errors.typeError("invalid type for argument '{s}'", .{field.name}) catch {};
-                            releaseFields(&value, assigned_count);
+                            releaseFields(&value, &initialized);
                             return null;
                         };
                     } else {
                         @field(value, field.name) = convert.fromPy(field.type, py_item) catch {
                             errors.typeError("invalid type for argument '{s}'", .{field.name}) catch {};
-                            releaseFields(&value, assigned_count);
+                            releaseFields(&value, &initialized);
                             return null;
                         };
                     }
-                    assigned_count += 1;
+                    initialized[i] = true;
                 } else if (kwargs_dict) |kw| {
                     // Try keyword argument by name
                     const name_z = field.name ++ "\x00";
@@ -308,13 +316,13 @@ pub fn pyfn_kw(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject, ?*c.PyObj
                             const inner_type = @typeInfo(field.type).optional.child;
                             @field(value, field.name) = convert.fromPy(inner_type, py_item) catch {
                                 errors.typeError("invalid type for argument '{s}'", .{field.name}) catch {};
-                                releaseFields(&value, assigned_count);
+                                releaseFields(&value, &initialized);
                                 return null;
                             };
                         } else {
                             @field(value, field.name) = convert.fromPy(field.type, py_item) catch {
                                 errors.typeError("invalid type for argument '{s}'", .{field.name}) catch {};
-                                releaseFields(&value, assigned_count);
+                                releaseFields(&value, &initialized);
                                 return null;
                             };
                         }
@@ -324,26 +332,26 @@ pub fn pyfn_kw(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject, ?*c.PyObj
                         @field(value, field.name) = null;
                     } else {
                         errors.typeError("missing required argument: '{s}'", .{field.name}) catch {};
-                        releaseFields(&value, assigned_count);
+                        releaseFields(&value, &initialized);
                         return null;
                     }
+                    initialized[i] = true;
                 } else if (has_default) {
                     @field(value, field.name) = field.defaultValue().?;
+                    initialized[i] = true;
                 } else if (is_optional) {
                     @field(value, field.name) = null;
+                    initialized[i] = true;
                 } else {
                     errors.typeError("missing required argument: '{s}'", .{field.name}) catch {};
-                    releaseFields(&value, assigned_count);
+                    releaseFields(&value, &initialized);
                     return null;
-                }
-                if (assigned_count == i) {
-                    assigned_count += 1;
                 }
             }
 
             const wrapped = ArgsWrapper{ .value = value };
             const result = func(wrapped);
-            releaseFields(&value, assigned_count);
+            releaseFields(&value, &initialized);
             return convert.handleReturn(@TypeOf(result), result);
         }
     };

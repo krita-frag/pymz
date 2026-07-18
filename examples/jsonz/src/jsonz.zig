@@ -359,7 +359,7 @@ const json_path_doc = "A dot-separated JSON path query.";
 
 const JsonPath = pymz.class(JsonPathImpl, json_path_doc);
 
-pub const pymz_module = pymz.module("jsonz", .{
+pub const pymz_module = pymz.module("_jsonz", .{
     .__pymz_param_names__ = .{
         .parse_json = "text",
         .validate_json = "text",

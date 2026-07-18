@@ -82,10 +82,23 @@ pub const Object = extern struct {
                     return @intCast(value);
                 }
 
-                const value = if (version.is_py3)
+                // Unsigned target: in Py2 we must go through the signed
+                // `PyInt_AsLong` API (there is no `PyInt_AsUnsignedLongLong`),
+                // then range-check ourselves. Naively `@intCast`-ing a
+                // negative `c_long` into `c_ulonglong` panics in safe builds
+                // and silently wraps in unsafe builds, so reject negatives
+                // explicitly with a Python OverflowError instead.
+                const value: c_ulonglong = if (version.is_py3)
                     c.PyLong_AsUnsignedLongLong(@as(*c.PyObject, @ptrCast(self)))
-                else
-                    @as(c_ulonglong, @intCast(c.PyInt_AsLong(@as(*c.PyObject, @ptrCast(self)))));
+                else blk: {
+                    const signed = c.PyInt_AsLong(@as(*c.PyObject, @ptrCast(self)));
+                    if (signed == -1 and errors.errorOccurred() != null) return error.PyError;
+                    if (signed < 0) {
+                        errors.overflowError("can't convert negative value to unsigned", .{}) catch {};
+                        return error.PyError;
+                    }
+                    break :blk @as(c_ulonglong, @intCast(signed));
+                };
                 if (value == @as(c_ulonglong, @bitCast(@as(c_longlong, -1))) and
                     errors.errorOccurred() != null)
                 {

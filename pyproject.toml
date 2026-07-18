@@ -1,0 +1,18 @@
+# PEP 518 build-system declaration. Project metadata lives in setup.py so that
+# Python 2.7 (which does not parse pyproject.toml) and alternative runtimes
+# (PyPy, GraalPy, MicroPython, ...) can install this package via the legacy
+# `python setup.py install` entry point. Modern `pip install .` on Py3 reads
+# the build-system below and then defers metadata to setup.py.
+
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# ---------------------------------------------------------------------------
+# Tool configuration (does not affect packaging)
+# ---------------------------------------------------------------------------
+#
+# pytest configuration lives in pytest.ini so it is picked up even when this
+# package is installed into a third-party project as a build dependency
+# (setuptools copies pyproject.toml into the sdist but the test runner still
+# honours pytest.ini at the repository root).

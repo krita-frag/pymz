@@ -12,6 +12,7 @@
         "build.zig.zon",
         "README.md",
         "setup.py",
+        "python",
         "src",
         "tests",
     },

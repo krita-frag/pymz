@@ -1,7 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.so
+*.pyd
+*.egg-info/
+.pytest_cache/
+
+# Zig
+zig-out/
+.zig-cache/
+zig-global-cache/
+
+# Build outputs
 dist/
 build/
-__pycache__
-*.so
-*.pyc
-*.egg-info
 
+# macOS / editor cruft
+.DS_Store
+.envrc
+
+# Stray build artifacts
+envcheck.o
+*.o
+
+# Local Zig package cache snapshots
+zig-pkg/
+
+# Local CodeGraph database (per-machine, not for committing)
+.codegraph/
