@@ -4,14 +4,37 @@ const std = @import("std");
 const c = @import("c.zig").c;
 const version = @import("version.zig");
 const errors = @import("errors.zig");
+const mem = @import("../../mem.zig");
+const compat = @import("compat.zig");
 const Error = errors.Error;
 
-inline fn cApiCheck(value: anytype) bool {
-    if (@TypeOf(value) == bool) {
-        return value;
-    }
-    return value == 1;
-}
+// ============================================================================
+// Buffer description
+// ============================================================================
+
+/// Description of a Python buffer exported by a class `__buffer__` method.
+/// Returning this from `__buffer__` enables multi-dimensional and/or strided
+/// buffer views.  Returning a plain `[]u8`/`[]const u8` is still supported as
+/// a shorthand for a one-dimensional read/write byte buffer.
+pub const Buffer = struct {
+    /// Pointer to the first element. The data must remain valid until the
+    /// buffer is released.
+    ptr: [*]u8,
+
+    /// Shape of the buffer. `shape.len` is the number of dimensions.
+    shape: []const usize,
+
+    /// Optional strides in bytes for each dimension. If `null`, the buffer is
+    /// assumed to be C-contiguous.
+    strides: ?[]const isize = null,
+
+    /// PEP-3118 format string. If `null`, memoryview infers unsigned bytes.
+    /// Common values: "B" (u8), "b" (i8), "i" (i32), "f" (f32), "d" (f64).
+    format: ?[]const u8 = null,
+
+    /// True if the buffer is read-only.
+    readonly: bool = false,
+};
 
 // ============================================================================
 // Core Object wrapper
@@ -38,6 +61,7 @@ pub const Object = extern struct {
         }
     }
 
+    /// Return a new reference to this object. The caller must decref it.
     pub inline fn newref(self: *Object) *Object {
         self.incref();
         return self;
@@ -56,7 +80,7 @@ pub const Object = extern struct {
     }
 
     pub inline fn isBool(self: *Object) bool {
-        return cApiCheck(c.PyBool_Check(@as(*c.PyObject, @ptrCast(self))));
+        return compat.cApiBool(c.PyBool_Check(@as(*c.PyObject, @ptrCast(self))));
     }
 
     pub inline fn asBool(self: *Object) bool {
@@ -65,43 +89,30 @@ pub const Object = extern struct {
 
     pub inline fn isInt(self: *Object) bool {
         if (version.is_py3) {
-            return cApiCheck(c.PyLong_Check(@as(*c.PyObject, @ptrCast(self))));
+            return compat.cApiBool(c.PyLong_Check(@as(*c.PyObject, @ptrCast(self))));
         }
-        return cApiCheck(c.PyInt_Check(@as(*c.PyObject, @ptrCast(self))));
+        return compat.cApiBool(c.PyInt_Check(@as(*c.PyObject, @ptrCast(self)))) or
+            compat.cApiBool(c.PyLong_Check(@as(*c.PyObject, @ptrCast(self))));
     }
 
     pub inline fn asInt(self: *Object, comptime T: type) Error!T {
         switch (@typeInfo(T)) {
             .int => |info| {
                 if (info.signedness == .signed) {
-                    const value = if (version.is_py3)
-                        c.PyLong_AsLongLong(@as(*c.PyObject, @ptrCast(self)))
-                    else
-                        c.PyInt_AsLong(@as(*c.PyObject, @ptrCast(self)));
-                    if (value == -1 and errors.errorOccurred() != null) return error.PyError;
+                    const value = try compat.intAsSigned(@as(*c.PyObject, @ptrCast(self)));
+                    const min = std.math.minInt(T);
+                    const max = std.math.maxInt(T);
+                    if (value < min or value > max) {
+                        errors.overflowError("int too large to convert to {s}", .{@typeName(T)}) catch {};
+                        return error.PyError;
+                    }
                     return @intCast(value);
                 }
 
-                // Unsigned target: in Py2 we must go through the signed
-                // `PyInt_AsLong` API (there is no `PyInt_AsUnsignedLongLong`),
-                // then range-check ourselves. Naively `@intCast`-ing a
-                // negative `c_long` into `c_ulonglong` panics in safe builds
-                // and silently wraps in unsafe builds, so reject negatives
-                // explicitly with a Python OverflowError instead.
-                const value: c_ulonglong = if (version.is_py3)
-                    c.PyLong_AsUnsignedLongLong(@as(*c.PyObject, @ptrCast(self)))
-                else blk: {
-                    const signed = c.PyInt_AsLong(@as(*c.PyObject, @ptrCast(self)));
-                    if (signed == -1 and errors.errorOccurred() != null) return error.PyError;
-                    if (signed < 0) {
-                        errors.overflowError("can't convert negative value to unsigned", .{}) catch {};
-                        return error.PyError;
-                    }
-                    break :blk @as(c_ulonglong, @intCast(signed));
-                };
-                if (value == @as(c_ulonglong, @bitCast(@as(c_longlong, -1))) and
-                    errors.errorOccurred() != null)
-                {
+                const value = try compat.intAsUnsigned(@as(*c.PyObject, @ptrCast(self)));
+                const max = std.math.maxInt(T);
+                if (value > max) {
+                    errors.overflowError("int too large to convert to {s}", .{@typeName(T)}) catch {};
                     return error.PyError;
                 }
                 return @intCast(value);
@@ -111,7 +122,7 @@ pub const Object = extern struct {
     }
 
     pub inline fn isFloat(self: *Object) bool {
-        return cApiCheck(c.PyFloat_Check(@as(*c.PyObject, @ptrCast(self))));
+        return compat.cApiBool(c.PyFloat_Check(@as(*c.PyObject, @ptrCast(self))));
     }
 
     pub inline fn asFloat(self: *Object, comptime T: type) Error!T {
@@ -130,15 +141,15 @@ pub const Object = extern struct {
     }
 
     pub inline fn isList(self: *Object) bool {
-        return cApiCheck(c.PyList_Check(@as(*c.PyObject, @ptrCast(self))));
+        return compat.cApiBool(c.PyList_Check(@as(*c.PyObject, @ptrCast(self))));
     }
 
     pub inline fn isTuple(self: *Object) bool {
-        return cApiCheck(c.PyTuple_Check(@as(*c.PyObject, @ptrCast(self))));
+        return compat.cApiBool(c.PyTuple_Check(@as(*c.PyObject, @ptrCast(self))));
     }
 
     pub inline fn isDict(self: *Object) bool {
-        return cApiCheck(c.PyDict_Check(@as(*c.PyObject, @ptrCast(self))));
+        return compat.cApiBool(c.PyDict_Check(@as(*c.PyObject, @ptrCast(self))));
     }
 
     pub inline fn sequenceLength(self: *Object) Error!usize {
@@ -147,6 +158,9 @@ pub const Object = extern struct {
         return @intCast(len);
     }
 
+    /// Borrow an item from a list or tuple. The returned reference is owned by
+    /// the container and must not be decref'd by the caller unless explicitly
+    /// incref'd.
     pub inline fn sequenceGet(self: *Object, index: usize) ?*Object {
         if (self.isList()) {
             const item = c.PyList_GetItem(
@@ -183,6 +197,9 @@ pub const Object = extern struct {
         return error.PyError;
     }
 
+    /// Borrow the value associated with `key` from a dict. The returned
+    /// reference is owned by the dict and must not be decref'd unless
+    /// explicitly incref'd.
     pub inline fn dictGetString(self: *Object, key: []const u8) Error!?*Object {
         const key_object = try Str.fromSlice(key);
         defer key_object.decref();
@@ -230,7 +247,9 @@ pub const Object = extern struct {
         return error.PyError;
     }
 
-    pub inline fn asString(self: *Object) [:0]const u8 {
+    /// Borrow the UTF-8 bytes backing a string object. The slice is valid only
+    /// while `self` is alive.
+    pub inline fn asString(self: *Object) Error![:0]const u8 {
         return Str.asString(@ptrCast(self));
     }
 
@@ -240,8 +259,12 @@ pub const Object = extern struct {
         return @intCast(n);
     }
 
-    pub inline fn isInstance(self: *Object, typ: *Type) bool {
-        return cApiCheck(c.PyObject_IsInstance(@as(*c.PyObject, @ptrCast(self)), @ptrCast(typ)));
+    pub inline fn isInstance(self: *Object, typ: *Type) Error!bool {
+        const rc = c.PyObject_IsInstance(
+            @as(*c.PyObject, @ptrCast(self)),
+            @as(*c.PyObject, @ptrCast(typ)),
+        );
+        return compat.cApiTriState(rc);
     }
 };
 
@@ -297,11 +320,12 @@ pub const Type = extern struct {
         return @as(*Type, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
     }
 
-    pub inline fn checkObject(self: *Type, obj: *Object) bool {
-        return cApiCheck(c.PyObject_TypeCheck(
+    pub inline fn checkObject(self: *Type, obj: *Object) Error!bool {
+        const rc = c.PyObject_TypeCheck(
             @as(*c.PyObject, @ptrCast(obj)),
             @as(*c.PyObject, @ptrCast(self)),
-        ));
+        );
+        return compat.cApiTriState(rc);
     }
 };
 
@@ -325,40 +349,66 @@ pub const Str = extern struct {
     }
 
     pub inline fn check(obj: *Object) bool {
-        if (version.is_py3) {
-            return cApiCheck(c.PyUnicode_Check(@as(*c.PyObject, @ptrCast(obj))));
-        } else {
-            return cApiCheck(c.PyString_Check(@as(*c.PyObject, @ptrCast(obj))));
-        }
+        return compat.strCheck(@as(*c.PyObject, @ptrCast(obj)));
     }
 
     pub inline fn fromSlice(s: []const u8) Error!*Str {
-        if (version.is_py3) {
-            if (c.PyUnicode_FromStringAndSize(s.ptr, @as(c.Py_ssize_t, @intCast(s.len)))) |r| return @as(*Str, @ptrCast(r));
-        } else {
-            if (c.PyString_FromStringAndSize(s.ptr, @as(c.Py_ssize_t, @intCast(s.len)))) |r| return @as(*Str, @ptrCast(r));
-        }
+        if (compat.strFromSlice(s)) |r| return @as(*Str, @ptrCast(r));
         return error.PyError;
     }
 
     pub inline fn fromFormat(comptime fmt: []const u8, args: anytype) Error!*Str {
-        const buf = try std.fmt.allocPrintZ(std.heap.c_allocator, fmt, args);
-        defer std.heap.c_allocator.free(buf);
+        const buf = try std.fmt.allocPrintZ(mem.allocator, fmt, args);
+        defer mem.allocator.free(buf);
         return fromSlice(buf);
     }
 
-    /// Return the bytes backing the string. The returned slice borrows from `self`.
-    pub inline fn asString(self: *Str) [:0]const u8 {
-        if (version.is_py3) {
-            var size: c.Py_ssize_t = 0;
-            const ptr = c.PyUnicode_AsUTF8AndSize(@as(*c.PyObject, @ptrCast(self)), &size);
-            if (ptr == null) return "";
-            return ptr[0..@as(usize, @intCast(size)) :0];
-        } else {
-            const ptr = c.PyString_AsString(@as(*c.PyObject, @ptrCast(self)));
-            if (ptr == null) return "";
-            return std.mem.span(ptr);
+    /// Borrow the UTF-8 bytes backing the string. The returned slice is valid
+    /// only while `self` is alive. Returns `error.PyError` if the object is not
+    /// a valid string (Python exception is already set).
+    pub inline fn asString(self: *Str) Error![:0]const u8 {
+        if (compat.strAsString(@as(*c.PyObject, @ptrCast(self)))) |s| {
+            return s;
         }
+        return error.PyError;
+    }
+};
+
+// ============================================================================
+// Unicode text wrapper (always Unicode: `unicode` on Python 2, `str` on Python 3)
+// ============================================================================
+
+pub const Unicode = extern struct {
+    impl: c.PyObject,
+
+    pub const IS_PYOBJECT = true;
+
+    pub inline fn incref(self: *Unicode) void {
+        @as(*Object, @ptrCast(self)).incref();
+    }
+    pub inline fn decref(self: *Unicode) void {
+        @as(*Object, @ptrCast(self)).decref();
+    }
+    pub inline fn newref(self: *Unicode) *Unicode {
+        return @as(*Unicode, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+    }
+
+    pub inline fn check(obj: *Object) bool {
+        return compat.cApiBool(c.PyUnicode_Check(@as(*c.PyObject, @ptrCast(obj))));
+    }
+
+    pub inline fn fromSlice(s: []const u8) Error!*Unicode {
+        if (compat.unicodeFromSlice(s)) |r| return @as(*Unicode, @ptrCast(r));
+        return error.PyError;
+    }
+
+    /// Return the UTF-8 bytes backing the unicode object. The returned slice
+    /// borrows from `self`.
+    pub inline fn asString(self: *Unicode) Error![:0]const u8 {
+        if (compat.strAsString(@as(*c.PyObject, @ptrCast(self)))) |s| {
+            return s;
+        }
+        return error.PyError;
     }
 };
 
@@ -382,18 +432,57 @@ pub const Bytes = extern struct {
     }
 
     pub inline fn check(obj: *Object) bool {
-        return cApiCheck(c.PyBytes_Check(@as(*c.PyObject, @ptrCast(obj))));
+        return compat.bytesCheck(@as(*c.PyObject, @ptrCast(obj)));
     }
 
     pub inline fn fromSlice(s: []const u8) Error!*Bytes {
-        if (c.PyBytes_FromStringAndSize(s.ptr, @as(c.Py_ssize_t, @intCast(s.len)))) |r| return @as(*Bytes, @ptrCast(r));
+        if (compat.bytesFromSlice(s)) |r| return @as(*Bytes, @ptrCast(r));
         return error.PyError;
     }
 
-    pub inline fn asSlice(self: *Bytes) []const u8 {
+    /// Return the bytes backing the object. The returned slice borrows from `self`.
+    /// Returns `error.PyError` on failure (Python exception is already set).
+    pub inline fn asSlice(self: *Bytes) Error![]const u8 {
         var size: c.Py_ssize_t = 0;
-        const ptr = c.PyBytes_AsString(@as(*c.PyObject, @ptrCast(self)));
-        _ = c.PyBytes_AsStringAndSize(@as(*c.PyObject, @ptrCast(self)), &size);
+        const ptr = compat.bytesAsSlice(@as(*c.PyObject, @ptrCast(self)), &size) orelse return error.PyError;
+        return ptr[0..@as(usize, @intCast(size))];
+    }
+};
+
+// ============================================================================
+// Bytearray wrapper (mutable binary data)
+// ============================================================================
+
+pub const ByteArray = extern struct {
+    impl: c.PyObject,
+
+    pub const IS_PYOBJECT = true;
+
+    pub inline fn incref(self: *ByteArray) void {
+        @as(*Object, @ptrCast(self)).incref();
+    }
+    pub inline fn decref(self: *ByteArray) void {
+        @as(*Object, @ptrCast(self)).decref();
+    }
+    pub inline fn newref(self: *ByteArray) *ByteArray {
+        return @as(*ByteArray, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+    }
+
+    pub inline fn check(obj: *Object) bool {
+        return compat.byteArrayCheck(@as(*c.PyObject, @ptrCast(obj)));
+    }
+
+    pub inline fn fromSlice(s: []const u8) Error!*ByteArray {
+        if (compat.byteArrayFromSlice(s)) |r| {
+            return @as(*ByteArray, @ptrCast(r));
+        }
+        return error.PyError;
+    }
+
+    /// Return the bytes backing the bytearray. The returned slice borrows from `self`.
+    pub inline fn asSlice(self: *ByteArray) Error![]u8 {
+        var size: c.Py_ssize_t = 0;
+        const ptr = compat.byteArrayAsSlice(@as(*c.PyObject, @ptrCast(self)), &size) orelse return error.PyError;
         return ptr[0..@as(usize, @intCast(size))];
     }
 };

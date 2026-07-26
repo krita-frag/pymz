@@ -13,6 +13,7 @@ const errors = @import("errors.zig");
 const object = @import("object.zig");
 const types = @import("types.zig");
 const convert = @import("convert.zig");
+const stubs = @import("stubs.zig");
 const Object = object.Object;
 const Error = errors.Error;
 
@@ -103,10 +104,27 @@ pub inline fn method_kw(
 
 /// PyO3-style wrapper: turns a Zig function `fn (RawArgs) Error!*c.PyObject`
 /// into a Python C-callback. Use with `method("add", pyfn(add), .varargs, "...")`.
+///
+/// The returned callback accepts only positional arguments.  For a callback
+/// that also receives keyword arguments, use `pyfn_varargs`.
 pub inline fn pyfn(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject) callconv(.c) ?*c.PyObject {
     const S = struct {
         fn wrapper(_: ?*c.PyObject, py_args: ?*c.PyObject) callconv(.c) ?*c.PyObject {
             const args = RawArgs.fromTuple(@ptrCast(py_args), null);
+            const result = func(args) catch return null;
+            return result;
+        }
+    };
+    return S.wrapper;
+}
+
+/// Wrapper for functions that need the full positional and keyword argument
+/// payload.  The Zig function receives a `RawArgs` where `kwargs` is non-null
+/// when the caller passed keyword arguments.
+pub inline fn pyfn_varargs(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject, ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    const S = struct {
+        fn wrapper(_: ?*c.PyObject, py_args: ?*c.PyObject, py_kwargs: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+            const args = RawArgs.fromTuple(@ptrCast(py_args), @ptrCast(py_kwargs));
             const result = func(args) catch return null;
             return result;
         }
@@ -143,10 +161,19 @@ pub fn pyfn_typed(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject) callco
             const args_tuple: ?*types.Tuple = if (py_args) |a| @ptrCast(a) else null;
             const num_pos: usize = if (args_tuple) |t| t.length() else 0;
 
-            if (num_pos != Params.len) {
+            const required_count = comptime blk: {
+                var count: usize = 0;
+                for (Params) |param| {
+                    const is_optional = if (param.type) |PT| @typeInfo(PT) == .optional else false;
+                    if (!is_optional) count += 1;
+                }
+                break :blk count;
+            };
+
+            if (num_pos < required_count or num_pos > Params.len) {
                 errors.typeError(
-                    "function takes exactly {d} positional argument(s) ({d} given)",
-                    .{ Params.len, num_pos },
+                    "function takes {d} to {d} positional argument(s) ({d} given)",
+                    .{ required_count, Params.len, num_pos },
                 ) catch {};
                 return null;
             }
@@ -154,17 +181,168 @@ pub fn pyfn_typed(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject) callco
             var zig_args: std.meta.ArgsTuple(Fn) = undefined;
             var converted_count: usize = 0;
             inline for (Params, 0..) |param, i| {
-                const py_item = args_tuple.?.get(i) orelse {
-                    errors.typeError("missing argument {d}", .{i + 1}) catch {};
+                const PT = param.type orelse @compileError("pyfn_typed: parameter has unknown type");
+                if (i < num_pos) {
+                    const py_item = args_tuple.?.get(i) orelse {
+                        errors.typeError("missing argument {d}", .{i + 1}) catch {};
+                        releaseConverted(&zig_args, converted_count);
+                        return null;
+                    };
+                    zig_args[i] = convert.fromPy(PT, py_item) catch {
+                        errors.typeError(
+                            "argument {d} expects {s}, got {s}",
+                            .{ i + 1, @typeName(PT), convert.pyTypeName(py_item) },
+                        ) catch {};
+                        releaseConverted(&zig_args, converted_count);
+                        return null;
+                    };
+                    converted_count += 1;
+                } else if (comptime @typeInfo(PT) == .optional) {
+                    zig_args[i] = null;
+                } else {
+                    errors.typeError("missing required argument {d}", .{i + 1}) catch {};
                     releaseConverted(&zig_args, converted_count);
                     return null;
-                };
-                const PT = param.type orelse @compileError("pyfn_typed: parameter " ++ std.fmt.comptimePrint("{d}", .{i}) ++ " has unknown type");
-                zig_args[i] = convert.fromPy(PT, py_item) catch {
+                }
+            }
+
+            const result = @call(.auto, func, zig_args);
+            releaseConverted(&zig_args, converted_count);
+            return convert.handleReturn(@TypeOf(result), result);
+        }
+    };
+    return S.wrapper;
+}
+
+// ============================================================================
+// Mixed positional/keyword wrapper (pyfn_mixed) — uses param names
+// ============================================================================
+
+/// Wrap a typed Zig function into a Python VARARGS|KEYWORDS callback.
+/// Arguments may be passed positionally or by keyword using `param_names`.
+pub fn pyfn_mixed(comptime func: anytype, comptime param_names: ?[]const u8) fn (?*c.PyObject, ?*c.PyObject, ?*c.PyObject) callconv(.c) ?*c.PyObject {
+    const Fn = @TypeOf(func);
+    const fn_info = @typeInfo(Fn).@"fn";
+    const Params = fn_info.params;
+
+    const S = struct {
+        const names = param_names;
+
+        fn releaseConverted(args: *std.meta.ArgsTuple(Fn), count: usize) void {
+            inline for (Params, 0..) |param, i| {
+                if (i < count) {
+                    if (param.type) |_| {
+                        convert.releaseValue(&args[i]);
+                    }
+                }
+            }
+        }
+
+        fn paramName(comptime index: usize) []const u8 {
+            if (names) |n| {
+                return stubs.getParamName(n, index);
+            }
+            return std.fmt.comptimePrint("arg{d}", .{index});
+        }
+
+        fn argIndex(keyword_name: []const u8) ?usize {
+            inline for (Params, 0..) |_, i| {
+                if (std.mem.eql(u8, keyword_name, comptime paramName(i))) {
+                    return i;
+                }
+            }
+            return null;
+        }
+
+        fn wrapper(_: ?*c.PyObject, py_args: ?*c.PyObject, py_kwargs: ?*c.PyObject) callconv(.c) ?*c.PyObject {
+            const args_tuple: ?*types.Tuple = if (py_args) |a| @ptrCast(a) else null;
+            const kwargs_dict: ?*types.Dict = if (py_kwargs) |k| @ptrCast(k) else null;
+            const pos_count: usize = if (args_tuple) |t| t.length() else 0;
+
+            if (pos_count > Params.len) {
+                errors.typeError(
+                    "function takes at most {d} positional argument(s) ({d} given)",
+                    .{ Params.len, pos_count },
+                ) catch {};
+                return null;
+            }
+
+            if (kwargs_dict) |kw| {
+                var pos: c.Py_ssize_t = 0;
+                var key_obj: ?*c.PyObject = null;
+                var value_obj: ?*c.PyObject = null;
+                while (c.PyDict_Next(@ptrCast(kw), &pos, &key_obj, &value_obj) != 0) {
+                    const keyword_obj: *Object = @ptrCast(key_obj orelse {
+                        errors.typeError("keyword argument name must be str", .{}) catch {};
+                        return null;
+                    });
+                    if (!object.Str.check(keyword_obj)) {
+                        errors.typeError("keyword argument name must be str", .{}) catch {};
+                        return null;
+                    }
+
+                    const keyword_name = object.Str.asString(@ptrCast(keyword_obj)) catch |err| {
+                        errors.mapError(err) catch {};
+                        return null;
+                    };
+                    const arg_idx = argIndex(keyword_name) orelse {
+                        errors.typeError("got an unexpected keyword argument '{s}'", .{keyword_name}) catch {};
+                        return null;
+                    };
+                    if (arg_idx < pos_count) {
+                        errors.typeError("got multiple values for argument '{s}'", .{keyword_name}) catch {};
+                        return null;
+                    }
+                }
+            }
+
+            var zig_args: std.meta.ArgsTuple(Fn) = undefined;
+            var converted_count: usize = 0;
+            inline for (Params, 0..) |param, i| {
+                const PT = param.type orelse @compileError("pyfn_mixed: parameter has unknown type");
+                if (i < pos_count) {
+                    const py_item = args_tuple.?.get(i) orelse {
+                        errors.typeError("missing positional argument {d}", .{i + 1}) catch {};
+                        releaseConverted(&zig_args, converted_count);
+                        return null;
+                    };
+                    zig_args[i] = convert.fromPy(PT, py_item) catch {
+                        errors.typeError(
+                            "argument '{s}' expects {s}, got {s}",
+                            .{ comptime paramName(i), @typeName(PT), convert.pyTypeName(py_item) },
+                        ) catch {};
+                        releaseConverted(&zig_args, converted_count);
+                        return null;
+                    };
+                    converted_count += 1;
+                } else if (kwargs_dict) |kw| {
+                    const name_z = comptime paramName(i) ++ "\x00";
+                    const name_ptr: [*c]const u8 = name_z.ptr;
+                    if (c.PyDict_GetItemString(@ptrCast(kw), name_ptr)) |item| {
+                        const py_item: *Object = @ptrCast(item);
+                        zig_args[i] = convert.fromPy(PT, py_item) catch {
+                            errors.typeError(
+                                "argument '{s}' expects {s}, got {s}",
+                                .{ comptime paramName(i), @typeName(PT), convert.pyTypeName(py_item) },
+                            ) catch {};
+                            releaseConverted(&zig_args, converted_count);
+                            return null;
+                        };
+                        converted_count += 1;
+                    } else if (comptime @typeInfo(PT) == .optional) {
+                        zig_args[i] = null;
+                    } else {
+                        errors.typeError("missing required argument: '{s}'", .{comptime paramName(i)}) catch {};
+                        releaseConverted(&zig_args, converted_count);
+                        return null;
+                    }
+                } else if (comptime @typeInfo(PT) == .optional) {
+                    zig_args[i] = null;
+                } else {
+                    errors.typeError("missing required argument: '{s}'", .{comptime paramName(i)}) catch {};
                     releaseConverted(&zig_args, converted_count);
                     return null;
-                };
-                converted_count += 1;
+                }
             }
 
             const result = @call(.auto, func, zig_args);
@@ -261,7 +439,10 @@ pub fn pyfn_kw(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject, ?*c.PyObj
                         return null;
                     }
 
-                    const keyword_name = object.Str.asString(@ptrCast(keyword_obj));
+                    const keyword_name = object.Str.asString(@ptrCast(keyword_obj)) catch |err| {
+                        errors.mapError(err) catch {};
+                        return null;
+                    };
                     const field_idx = fieldIndex(keyword_name) orelse {
                         errors.typeError("got an unexpected keyword argument '{s}'", .{keyword_name}) catch {};
                         return null;
@@ -292,13 +473,19 @@ pub fn pyfn_kw(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject, ?*c.PyObj
                     } else if (is_optional) {
                         const inner_type = @typeInfo(field.type).optional.child;
                         @field(value, field.name) = convert.fromPy(inner_type, py_item) catch {
-                            errors.typeError("invalid type for argument '{s}'", .{field.name}) catch {};
+                            errors.typeError(
+                                "argument '{s}' expects {s}, got {s}",
+                                .{ field.name, @typeName(inner_type), convert.pyTypeName(py_item) },
+                            ) catch {};
                             releaseFields(&value, &initialized);
                             return null;
                         };
                     } else {
                         @field(value, field.name) = convert.fromPy(field.type, py_item) catch {
-                            errors.typeError("invalid type for argument '{s}'", .{field.name}) catch {};
+                            errors.typeError(
+                                "argument '{s}' expects {s}, got {s}",
+                                .{ field.name, @typeName(field.type), convert.pyTypeName(py_item) },
+                            ) catch {};
                             releaseFields(&value, &initialized);
                             return null;
                         };
@@ -315,13 +502,19 @@ pub fn pyfn_kw(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject, ?*c.PyObj
                         } else if (is_optional) {
                             const inner_type = @typeInfo(field.type).optional.child;
                             @field(value, field.name) = convert.fromPy(inner_type, py_item) catch {
-                                errors.typeError("invalid type for argument '{s}'", .{field.name}) catch {};
+                                errors.typeError(
+                                    "argument '{s}' expects {s}, got {s}",
+                                    .{ field.name, @typeName(inner_type), convert.pyTypeName(py_item) },
+                                ) catch {};
                                 releaseFields(&value, &initialized);
                                 return null;
                             };
                         } else {
                             @field(value, field.name) = convert.fromPy(field.type, py_item) catch {
-                                errors.typeError("invalid type for argument '{s}'", .{field.name}) catch {};
+                                errors.typeError(
+                                    "argument '{s}' expects {s}, got {s}",
+                                    .{ field.name, @typeName(field.type), convert.pyTypeName(py_item) },
+                                ) catch {};
                                 releaseFields(&value, &initialized);
                                 return null;
                             };
@@ -401,6 +594,29 @@ pub const RawArgs = struct {
             return error.PyError;
         }
         return @ptrCast(obj);
+    }
+
+    /// Return true if any keyword arguments were supplied.
+    pub inline fn hasKwargs(self: RawArgs) bool {
+        return self.kwargs != null and self.kwargs.?.length() > 0;
+    }
+
+    /// Return the number of supplied keyword arguments.
+    pub inline fn kwLen(self: RawArgs) usize {
+        return if (self.kwargs) |kw| kw.length() else 0;
+    }
+
+    /// Borrowed reference to a keyword argument by name, or null if missing.
+    pub inline fn getKw(self: RawArgs, name: [:0]const u8) ?*Object {
+        const kw = self.kwargs orelse return null;
+        return kw.getItemString(name);
+    }
+
+    /// Return a keyword argument by name, raising TypeError if it is missing.
+    pub inline fn getKwObject(self: RawArgs, name: [:0]const u8) Error!*Object {
+        if (self.getKw(name)) |o| return o;
+        try errors.typeError("missing required keyword argument: '{s}'", .{name});
+        return error.PyError;
     }
 };
 

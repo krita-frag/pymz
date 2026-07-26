@@ -5,13 +5,65 @@ const c = @import("c.zig").c;
 const version = @import("version.zig");
 const object = @import("object.zig");
 const types = @import("types.zig");
+const mem = @import("../../mem.zig");
 const Object = object.Object;
 
-pub const Error = error{PyError};
+/// Errors that can originate in Zig code and are propagated to Python.
+///
+/// Most functions still return `error.PyError` because the Python exception state
+/// is already set.  Other variants let Zig code surface a native failure without
+/// manually setting a Python exception before returning.
+pub const Error = error{
+    PyError,
+    OutOfMemory,
+    Overflow,
+    InvalidArgument,
+    IndexOutOfBounds,
+    KeyNotFound,
+    InvalidUtf8,
+    SystemError,
+};
 
 /// Runtime-neutral public result type alias.
 pub inline fn Result(comptime T: type) type {
     return Error!T;
+}
+
+/// Map a Zig error to an appropriate Python exception and return `error.PyError`.
+///
+/// Callers should use this when a Zig function returns a non-`PyError` error and
+/// they want Python to see a meaningful exception type.  If a Python exception is
+/// already set, the existing exception is preserved.
+pub fn mapError(err: anyerror) Error!void {
+    if (err == error.PyError) {
+        return error.PyError;
+    }
+
+    switch (err) {
+        error.OutOfMemory => c.PyErr_SetString(c.PyExc_MemoryError, @ptrCast("out of memory")),
+        error.Overflow => c.PyErr_SetString(c.PyExc_OverflowError, @ptrCast("integer overflow")),
+        error.InvalidArgument => c.PyErr_SetString(c.PyExc_ValueError, @ptrCast("invalid argument")),
+        error.IndexOutOfBounds => c.PyErr_SetString(c.PyExc_IndexError, @ptrCast("index out of bounds")),
+        error.KeyNotFound => c.PyErr_SetString(c.PyExc_KeyError, @ptrCast("key not found")),
+        error.InvalidUtf8 => c.PyErr_SetString(c.PyExc_UnicodeDecodeError, @ptrCast("invalid UTF-8")),
+        error.SystemError => c.PyErr_SetString(c.PyExc_SystemError, @ptrCast("system error")),
+        else => {
+            const printed = std.fmt.allocPrint(mem.allocator, "zig error: {s}", .{@errorName(err)}) catch {
+                c.PyErr_SetString(c.PyExc_RuntimeError, @ptrCast("zig function returned an error"));
+                return error.PyError;
+            };
+            defer mem.allocator.free(printed);
+            const msg = mem.allocator.allocSentinel(u8, printed.len, 0) catch {
+                c.PyErr_SetString(c.PyExc_RuntimeError, @ptrCast("zig function returned an error"));
+                return error.PyError;
+            };
+            defer mem.allocator.free(msg);
+            @memcpy(msg, printed);
+            c.PyErr_SetString(c.PyExc_RuntimeError, @ptrCast(msg));
+        },
+    }
+
+    return error.PyError;
 }
 
 pub inline fn errorOccurred() ?*c.PyObject {
@@ -51,17 +103,17 @@ pub inline fn errorFormat(exc: *c.PyObject, comptime format: []const u8, args: a
         c.PyErr_SetString(exc, @ptrCast(format));
         return error.PyError;
     }
-    const printed = std.fmt.allocPrint(std.heap.c_allocator, format, args) catch {
+    const printed = std.fmt.allocPrint(mem.allocator, format, args) catch {
         c.PyErr_SetString(c.PyExc_MemoryError, @ptrCast("out of memory"));
         return error.PyError;
     };
-    defer std.heap.c_allocator.free(printed);
-    const buf = std.heap.c_allocator.allocSentinel(u8, printed.len, 0) catch {
+    defer mem.allocator.free(printed);
+    const buf = mem.allocator.allocSentinel(u8, printed.len, 0) catch {
         c.PyErr_SetString(c.PyExc_MemoryError, @ptrCast("out of memory"));
         return error.PyError;
     };
     @memcpy(buf, printed);
-    defer std.heap.c_allocator.free(buf);
+    defer mem.allocator.free(buf);
     c.PyErr_SetString(exc, @ptrCast(buf));
     return error.PyError;
 }
@@ -242,17 +294,17 @@ pub fn createException(
 ) Error!Exception {
     // Build the fully qualified name "modname.name" required by PyErr_NewException.
     const mod_name_str = mod.getName();
-    const qual_name_noz = std.fmt.allocPrint(std.heap.c_allocator, "{s}.{s}", .{ mod_name_str, name }) catch {
+    const qual_name_noz = std.fmt.allocPrint(mem.allocator, "{s}.{s}", .{ mod_name_str, name }) catch {
         c.PyErr_SetString(c.PyExc_MemoryError, @ptrCast("out of memory"));
         return error.PyError;
     };
-    defer std.heap.c_allocator.free(qual_name_noz);
+    defer mem.allocator.free(qual_name_noz);
     // Add sentinel terminator for the C API.
-    const qual_name = std.heap.c_allocator.allocSentinel(u8, qual_name_noz.len, 0) catch {
+    const qual_name = mem.allocator.allocSentinel(u8, qual_name_noz.len, 0) catch {
         c.PyErr_SetString(c.PyExc_MemoryError, @ptrCast("out of memory"));
         return error.PyError;
     };
-    defer std.heap.c_allocator.free(qual_name);
+    defer mem.allocator.free(qual_name);
     @memcpy(qual_name[0..qual_name_noz.len], qual_name_noz);
 
     const base_obj = base.toPyObject();

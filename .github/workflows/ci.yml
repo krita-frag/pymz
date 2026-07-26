@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  ZIG_VERSION: 0.16.0-dev.2979+e93834410
+
+jobs:
+  zig-tool-tests:
+    name: Zig tool unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Run Zig unit tests
+        run: cd pymz-tool && zig build test --summary all
+
+  python3-matrix:
+    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Install pymz_setuptools
+        run: pip install -e .
+      - name: Build jsonz extension
+        working-directory: examples/jsonz
+        run: zig build example
+      - name: Run Python tests
+        run: pytest
+
+  python2-regression:
+    name: Python 2.7 regression
+    runs-on: ubuntu-latest
+    container: python:2.7
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Zig
+        run: |
+          apt-get update && apt-get install -y wget xz-utils
+          url="https://ziglang.org/builds/zig-linux-x86_64-${{ env.ZIG_VERSION }}.tar.xz"
+          wget -q "$url" -O /tmp/zig.tar.xz
+          tar -xf /tmp/zig.tar.xz -C /usr/local
+          zig_dir="/usr/local/zig-linux-x86_64-${{ env.ZIG_VERSION }}"
+          ln -s "${zig_dir}/zig" /usr/local/bin/zig
+          echo "ZIG_DIR=${zig_dir}" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        run: pip install setuptools wheel "pytest<5"
+      - name: Install pymz_setuptools
+        run: pip install -e .
+      - name: Build jsonz extension
+        working-directory: examples/jsonz
+        run: zig build example
+      - name: Run Python 2 regression tests
+        working-directory: examples/jsonz
+        run: pytest
+
+  windows:
+    name: Windows native build (MSYS2 UCRT64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-pip
+            mingw-w64-ucrt-x86_64-python-pytest
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Install pymz_setuptools
+        run: pip install -e .
+      - name: Build jsonz extension
+        working-directory: examples/jsonz
+        run: zig build example
+      - name: Run Python tests
+        working-directory: examples/jsonz
+        run: pytest

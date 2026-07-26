@@ -11,6 +11,13 @@
 const std = @import("std");
 const traits = @import("traits.zig");
 
+/// True when the current build is the stub generator. Root must declare
+/// `pub const pymz_stubgen = true;` to opt in.
+pub inline fn isStubgenBuild() bool {
+    const root = @import("root");
+    return comptime if (@hasDecl(root, "pymz_stubgen")) root.pymz_stubgen else false;
+}
+
 // ============================================================================
 // .pyi stub generation
 // ============================================================================
@@ -247,8 +254,8 @@ fn pythonTypeName(comptime T: type) []const u8 {
             return pythonTypeName(info.payload);
         },
         .pointer => |info| {
-            if (traits.isStringSlice(T)) {
-                return "str";
+            if (info.size == .slice and info.child == u8) {
+                return if (info.is_const) "str" else "bytes";
             }
             if (traits.isObjectPtr(T)) {
                 return "Any";
@@ -282,7 +289,7 @@ fn buildStubParams(
     }
     const params = fn_info.@"fn".params;
     const skip: usize = switch (kind) {
-        .instance_method => 1,
+        .instance_method, .class_method => 1,
         .module_func, .static_method => 0,
     };
 
@@ -364,6 +371,28 @@ fn buildStubParams(
                 }
             }
             return result;
+        },
+        .mixed => {
+            var result: []const u8 = "";
+            var need_comma = false;
+            var arg_index: usize = 0;
+            for (params[skip..]) |param| {
+                const param_type = param.type orelse continue;
+                if (need_comma) {
+                    result = result ++ ", ";
+                }
+                result = result ++ buildTypedParam(
+                    parameterDisplayName(param_names, arg_index),
+                    param_type,
+                    defaultSuffixForType(param_type, false),
+                );
+                need_comma = true;
+                arg_index += 1;
+            }
+            return result;
+        },
+        .varargs => {
+            return "*args: Any, **kwargs: Any";
         },
     }
 }
@@ -458,7 +487,16 @@ fn buildClassMethodStubs(comptime T: type) []const MethodStub {
             var tmp: [method_count]MethodStub = undefined;
             var index: usize = 0;
             for (decls) |decl| {
-                if (isInstanceStubMethod(T, decl.name)) {
+                if (isClassStubMethod(T, decl.name)) {
+                    tmp[index] = methodStubAuto(
+                        decl.name,
+                        @TypeOf(@field(T, decl.name)),
+                        .class_method,
+                        classMethodParamNames(T, decl.name),
+                        null,
+                    );
+                    index += 1;
+                } else if (isInstanceStubMethod(T, decl.name)) {
                     tmp[index] = methodStubAuto(
                         decl.name,
                         @TypeOf(@field(T, decl.name)),
@@ -487,18 +525,29 @@ fn buildClassMethodStubs(comptime T: type) []const MethodStub {
 fn countClassMethods(comptime T: type, comptime decls: anytype) usize {
     var count: usize = 0;
     for (decls) |decl| {
-        if (isInstanceStubMethod(T, decl.name) or isStaticStubMethod(T, decl.name)) {
+        if (isClassStubMethod(T, decl.name) or isInstanceStubMethod(T, decl.name) or isStaticStubMethod(T, decl.name)) {
             count += 1;
         }
     }
     return count;
 }
 
+fn isClassStubMethod(comptime T: type, comptime name: []const u8) bool {
+    if (!@hasDecl(T, "__pymz_class_methods__")) return false;
+    const cm = T.__pymz_class_methods__;
+    if (!@hasField(@TypeOf(cm), name)) return false;
+    return @field(cm, name);
+}
+
 fn isInstanceStubMethod(comptime T: type, comptime name: []const u8) bool {
     if (!@hasDecl(T, name)) {
         return false;
     }
-    if (isExcludedStubDunder(name)) {
+    // Context-manager and pickle dunders are looked up as instance methods.
+    if (isExcludedStubDunder(name) and
+        !isContextManagerDunder(name) and
+        !isPickleDunder(name))
+    {
         return false;
     }
     const F = @TypeOf(@field(T, name));
@@ -521,6 +570,10 @@ fn isStaticStubMethod(comptime T: type, comptime name: []const u8) bool {
     if (!@hasDecl(T, name)) {
         return false;
     }
+    // Context-manager and pickle dunders are never static.
+    if (isContextManagerDunder(name) or isPickleDunder(name)) {
+        return false;
+    }
     if (isExcludedStubDunder(name)) {
         return false;
     }
@@ -528,10 +581,12 @@ fn isStaticStubMethod(comptime T: type, comptime name: []const u8) bool {
     if (@typeInfo(F) != .@"fn") {
         return false;
     }
+    if (isClassStubMethod(T, name)) return false;
     return !isInstanceStubMethod(T, name);
 }
 
 fn isExcludedStubDunder(comptime name: []const u8) bool {
+    @setEvalBranchQuota(5000);
     const excluded = [_][]const u8{
         "__new__",      "__del__",  "__repr__",    "__str__",     "__hash__",
         "__eq__",       "__ne__",   "__lt__",      "__le__",      "__gt__",
@@ -544,6 +599,18 @@ fn isExcludedStubDunder(comptime name: []const u8) bool {
         }
     }
     return false;
+}
+
+/// True if `name` is a context-manager dunder that should appear in `.pyi` stubs.
+fn isContextManagerDunder(comptime name: []const u8) bool {
+    return std.mem.eql(u8, name, "__enter__") or std.mem.eql(u8, name, "__exit__");
+}
+
+/// True if `name` is a pickle/copy dunder that should appear in `.pyi` stubs.
+fn isPickleDunder(comptime name: []const u8) bool {
+    return std.mem.eql(u8, name, "__reduce__") or
+        std.mem.eql(u8, name, "__getstate__") or
+        std.mem.eql(u8, name, "__setstate__");
 }
 
 // ============================================================================
@@ -559,6 +626,8 @@ pub const MethodKind = enum {
     instance_method,
     /// Static method: no hidden parameter.
     static_method,
+    /// Class method: hidden `$type` parameter.
+    class_method,
 };
 
 /// Build an `ml_doc` string with an embedded `__text_signature__`.
@@ -591,6 +660,10 @@ pub const KwargsMode = enum {
     /// Auto kwargs: required params positional-only, optional params as keywords.
     /// `funcname($module, req1, req2, /, opt1=None, opt2=None)`.
     auto_kwargs,
+    /// Mixed positional/keyword: `funcname($module, a, b)`.
+    mixed,
+    /// Fully variadic: `funcname($module, *args, **kwargs)`.
+    varargs,
 };
 
 /// Full-featured `ml_doc` builder with explicit kwargs mode and optional
@@ -616,6 +689,7 @@ pub fn buildMlDocWithOptions(
         const hidden: ?[]const u8 = switch (kind) {
             .module_func => "$module",
             .instance_method => "$self",
+            .class_method => "$type",
             .static_method => null,
         };
 
@@ -656,7 +730,7 @@ pub fn buildMlDocWithOptions(
                 }
 
                 const skip: usize = switch (kind) {
-                    .instance_method => 1,
+                    .instance_method, .class_method => 1,
                     .module_func, .static_method => 0,
                 };
 
@@ -709,7 +783,7 @@ pub fn buildMlDocWithOptions(
 
                 // Skip self/cls parameter for instance/class methods
                 const skip: usize = switch (kind) {
-                    .instance_method => 1,
+                    .instance_method, .class_method => 1,
                     .module_func, .static_method => 0,
                 };
 
@@ -736,6 +810,42 @@ pub fn buildMlDocWithOptions(
                     result = result ++ ", /";
                 }
             },
+            .mixed => {
+                // Mixed positional/keyword: funcname($module, a, b)
+                var has_any = false;
+                if (hidden) |h| {
+                    result = result ++ h;
+                    has_any = true;
+                }
+
+                const skip: usize = switch (kind) {
+                    .instance_method, .class_method => 1,
+                    .module_func, .static_method => 0,
+                };
+
+                var arg_idx: usize = 0;
+                for (params[skip..]) |param| {
+                    if (param.type) |ptype| {
+                        if (has_any) result = result ++ ", ";
+                        if (param_names) |pn| {
+                            result = result ++ getParamName(pn, arg_idx);
+                        } else {
+                            result = result ++ std.fmt.comptimePrint("arg{d}", .{arg_idx});
+                        }
+                        if (@typeInfo(ptype) == .optional) {
+                            result = result ++ "=None";
+                        }
+                        has_any = true;
+                        arg_idx += 1;
+                    }
+                }
+            },
+            .varargs => {
+                if (hidden) |h| {
+                    result = result ++ h ++ ", ";
+                }
+                result = result ++ "*args, **kwargs";
+            },
         }
 
         result = result ++ ")\n--\n\n";
@@ -760,7 +870,7 @@ fn comptimeStrZ(comptime s: []const u8) [:0]const u8 {
 /// Extract the Nth parameter name from a comma-separated string.
 /// e.g., getParamName("entries, ring, flags", 1) -> "ring"
 /// Falls back to "argN" if the index is out of range.
-fn getParamName(comptime names_str: []const u8, comptime idx: usize) []const u8 {
+pub fn getParamName(comptime names_str: []const u8, comptime idx: usize) []const u8 {
     comptime {
         var current_idx: usize = 0;
         var start: usize = 0;

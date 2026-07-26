@@ -5,16 +5,10 @@ const c = @import("c.zig").c;
 const version = @import("version.zig");
 const errors = @import("errors.zig");
 const object = @import("object.zig");
+const compat = @import("compat.zig");
 const Object = object.Object;
 const Error = errors.Error;
 const class_mod = @import("class.zig");
-
-inline fn cApiCheck(value: anytype) bool {
-    if (@TypeOf(value) == bool) {
-        return value;
-    }
-    return value == 1;
-}
 
 // ============================================================================
 // Integer wrapper
@@ -37,9 +31,11 @@ pub const Int = extern struct {
 
     pub inline fn check(obj: *Object) bool {
         if (version.is_py3) {
-            return cApiCheck(c.PyLong_Check(@as(*c.PyObject, @ptrCast(obj))));
+            return compat.cApiBool(c.PyLong_Check(@as(*c.PyObject, @ptrCast(obj))));
         } else {
-            return cApiCheck(c.PyInt_Check(@as(*c.PyObject, @ptrCast(obj))));
+            // Python 2 区分 int 与 long，两者都视为整数。
+            return compat.cApiBool(c.PyInt_Check(@as(*c.PyObject, @ptrCast(obj)))) or
+                compat.cApiBool(c.PyLong_Check(@as(*c.PyObject, @ptrCast(obj))));
         }
     }
 
@@ -55,20 +51,12 @@ pub const Int = extern struct {
     }
 
     pub inline fn fromSigned(value: isize) Error!*Int {
-        if (version.is_py3) {
-            if (c.PyLong_FromSsize_t(@as(c.Py_ssize_t, value))) |r| return @as(*Int, @ptrCast(r));
-        } else {
-            if (c.PyInt_FromLong(@as(c_long, @intCast(value)))) |r| return @as(*Int, @ptrCast(r));
-        }
+        if (compat.intFromSigned(value)) |r| return @as(*Int, @ptrCast(r));
         return error.PyError;
     }
 
     pub inline fn fromUnsigned(value: usize) Error!*Int {
-        if (version.is_py3) {
-            if (c.PyLong_FromSize_t(@as(c.size_t, value))) |r| return @as(*Int, @ptrCast(r));
-        } else {
-            if (c.PyInt_FromLong(@intCast(value))) |r| return @as(*Int, @ptrCast(r));
-        }
+        if (compat.intFromUnsigned(value)) |r| return @as(*Int, @ptrCast(r));
         return error.PyError;
     }
 
@@ -76,18 +64,21 @@ pub const Int = extern struct {
         switch (@typeInfo(T)) {
             .int => |info| {
                 if (info.signedness == .signed) {
-                    const v = if (version.is_py3)
-                        c.PyLong_AsLongLong(@as(*c.PyObject, @ptrCast(self)))
-                    else
-                        c.PyInt_AsLong(@as(*c.PyObject, @ptrCast(self)));
-                    if (v == -1 and errors.errorOccurred() != null) return error.PyError;
+                    const v = try compat.intAsSigned(@as(*c.PyObject, @ptrCast(self)));
+                    const min = std.math.minInt(T);
+                    const max = std.math.maxInt(T);
+                    if (v < min or v > max) {
+                        errors.overflowError("int too large to convert to {s}", .{@typeName(T)}) catch {};
+                        return error.PyError;
+                    }
                     return @intCast(v);
                 } else {
-                    const v = if (version.is_py3)
-                        c.PyLong_AsUnsignedLongLong(@as(*c.PyObject, @ptrCast(self)))
-                    else
-                        @as(c_ulonglong, @intCast(c.PyInt_AsLong(@as(*c.PyObject, @ptrCast(self)))));
-                    if (v == @as(c_ulonglong, @bitCast(@as(c_longlong, -1))) and errors.errorOccurred() != null) return error.PyError;
+                    const v = try compat.intAsUnsigned(@as(*c.PyObject, @ptrCast(self)));
+                    const max = std.math.maxInt(T);
+                    if (v > max) {
+                        errors.overflowError("int too large to convert to {s}", .{@typeName(T)}) catch {};
+                        return error.PyError;
+                    }
                     return @intCast(v);
                 }
             },
@@ -116,7 +107,7 @@ pub const Float = extern struct {
     }
 
     pub inline fn check(obj: *Object) bool {
-        return cApiCheck(c.PyFloat_Check(@as(*c.PyObject, @ptrCast(obj))));
+        return compat.cApiBool(c.PyFloat_Check(@as(*c.PyObject, @ptrCast(obj))));
     }
 
     pub inline fn from(value: anytype) Error!*Float {
@@ -160,7 +151,7 @@ pub const Bool = extern struct {
     }
 
     pub inline fn check(obj: *Object) bool {
-        return cApiCheck(c.PyBool_Check(@as(*c.PyObject, @ptrCast(obj))));
+        return compat.cApiBool(c.PyBool_Check(@as(*c.PyObject, @ptrCast(obj))));
     }
 
     pub inline fn from(value: bool) *Bool {
@@ -189,6 +180,10 @@ pub const Tuple = extern struct {
     }
     pub inline fn newref(self: *Tuple) *Tuple {
         return @as(*Tuple, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+    }
+
+    pub inline fn check(obj: *Object) bool {
+        return compat.cApiBool(c.PyTuple_Check(@as(*c.PyObject, @ptrCast(obj))));
     }
 
     pub inline fn new(size: usize) Error!*Tuple {
@@ -244,7 +239,7 @@ pub const List = extern struct {
     }
 
     pub inline fn check(obj: *Object) bool {
-        return cApiCheck(c.PyList_Check(@as(*c.PyObject, @ptrCast(obj))));
+        return compat.cApiBool(c.PyList_Check(@as(*c.PyObject, @ptrCast(obj))));
     }
 
     pub inline fn new(size: usize) Error!*List {
@@ -283,6 +278,10 @@ pub const Dict = extern struct {
 
     pub const IS_PYOBJECT = true;
 
+    pub inline fn check(obj: *Object) bool {
+        return compat.cApiBool(c.PyDict_Check(@as(*c.PyObject, @ptrCast(obj))));
+    }
+
     pub inline fn incref(self: *Dict) void {
         @as(*Object, @ptrCast(self)).incref();
     }
@@ -304,6 +303,162 @@ pub const Dict = extern struct {
 
     pub inline fn getItemString(self: *Dict, key: [:0]const u8) ?*Object {
         return @as(?*Object, @ptrCast(c.PyDict_GetItemString(@as(*c.PyObject, @ptrCast(self)), key)));
+    }
+};
+
+// ============================================================================
+// Set wrapper
+// ============================================================================
+
+pub const Set = extern struct {
+    impl: c.PyObject,
+
+    pub const IS_PYOBJECT = true;
+
+    pub inline fn incref(self: *Set) void {
+        @as(*Object, @ptrCast(self)).incref();
+    }
+    pub inline fn decref(self: *Set) void {
+        @as(*Object, @ptrCast(self)).decref();
+    }
+    pub inline fn newref(self: *Set) *Set {
+        return @as(*Set, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+    }
+
+    pub inline fn check(obj: *Object) bool {
+        return compat.cApiBool(c.PySet_Check(@as(*c.PyObject, @ptrCast(obj))));
+    }
+
+    pub inline fn new() Error!*Set {
+        if (c.PySet_New(null)) |r| return @as(*Set, @ptrCast(r));
+        return error.PyError;
+    }
+
+    pub inline fn fromSlice(items: []const *Object) Error!*Set {
+        const set = try new();
+        errdefer set.decref();
+        for (items) |item| {
+            try set.add(item);
+        }
+        return set;
+    }
+
+    pub inline fn add(self: *Set, obj: *Object) Error!void {
+        if (c.PySet_Add(@as(*c.PyObject, @ptrCast(self)), @ptrCast(obj)) < 0) return error.PyError;
+    }
+
+    pub inline fn contains(self: *Set, obj: *Object) Error!bool {
+        const rc = c.PySet_Contains(@as(*c.PyObject, @ptrCast(self)), @ptrCast(obj));
+        return compat.cApiTriState(rc);
+    }
+
+    pub inline fn length(self: *Set) usize {
+        return @intCast(c.PySet_Size(@as(*c.PyObject, @ptrCast(self))));
+    }
+
+    pub inline fn pop(self: *Set) Error!?*Object {
+        const item = c.PySet_Pop(@as(*c.PyObject, @ptrCast(self)));
+        if (item == null) {
+            if (errors.errorOccurred() != null) return error.PyError;
+            return null;
+        }
+        return @as(*Object, @ptrCast(item));
+    }
+};
+
+pub const FrozenSet = extern struct {
+    impl: c.PyObject,
+
+    pub const IS_PYOBJECT = true;
+
+    pub inline fn incref(self: *FrozenSet) void {
+        @as(*Object, @ptrCast(self)).incref();
+    }
+    pub inline fn decref(self: *FrozenSet) void {
+        @as(*Object, @ptrCast(self)).decref();
+    }
+    pub inline fn newref(self: *FrozenSet) *FrozenSet {
+        return @as(*FrozenSet, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+    }
+
+    pub inline fn check(obj: *Object) bool {
+        return compat.cApiBool(c.PyFrozenSet_Check(@as(*c.PyObject, @ptrCast(obj))));
+    }
+
+    pub inline fn fromSlice(items: []const *Object) Error!*FrozenSet {
+        const list = try List.new(items.len);
+        defer list.decref();
+        for (items, 0..) |item, i| {
+            list.setUnsafe(i, item);
+        }
+        if (c.PyFrozenSet_New(@as(*c.PyObject, @ptrCast(list)))) |r| return @as(*FrozenSet, @ptrCast(r));
+        return error.PyError;
+    }
+
+    pub inline fn length(self: *FrozenSet) usize {
+        return @intCast(c.PySet_Size(@as(*c.PyObject, @ptrCast(self))));
+    }
+};
+
+// ============================================================================
+// Slice wrapper
+// ============================================================================
+
+pub const Slice = extern struct {
+    impl: c.PyObject,
+
+    pub const IS_PYOBJECT = true;
+
+    pub inline fn incref(self: *Slice) void {
+        @as(*Object, @ptrCast(self)).incref();
+    }
+    pub inline fn decref(self: *Slice) void {
+        @as(*Object, @ptrCast(self)).decref();
+    }
+    pub inline fn newref(self: *Slice) *Slice {
+        return @as(*Slice, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+    }
+
+    pub inline fn check(obj: *Object) bool {
+        return compat.cApiBool(c.PySlice_Check(@as(*c.PyObject, @ptrCast(obj))));
+    }
+
+    pub inline fn new(start: ?isize, stop: ?isize, step: ?isize) Error!*Slice {
+        const start_obj: *c.PyObject = if (start) |s| @ptrCast(try Int.fromSigned(s)) else @ptrCast(c.Py_None);
+        const stop_obj: *c.PyObject = if (stop) |s| @ptrCast(try Int.fromSigned(s)) else @ptrCast(c.Py_None);
+        const step_obj: *c.PyObject = if (step) |s| @ptrCast(try Int.fromSigned(s)) else @ptrCast(c.Py_None);
+        if (c.PySlice_New(start_obj, stop_obj, step_obj)) |r| return @as(*Slice, @ptrCast(r));
+        return error.PyError;
+    }
+
+    pub const Indices = struct {
+        start: usize,
+        stop: usize,
+        step: isize,
+        length: usize,
+    };
+
+    /// Resolve the slice against a sequence of `length` items.
+    pub inline fn getIndices(self: *Slice, length: usize) Error!Indices {
+        var start: c.Py_ssize_t = 0;
+        var stop: c.Py_ssize_t = 0;
+        var step: c.Py_ssize_t = 0;
+        var slicelength: c.Py_ssize_t = 0;
+        const rc = c.PySlice_GetIndicesEx(
+            @as(*c.PyObject, @ptrCast(self)),
+            @as(c.Py_ssize_t, @intCast(length)),
+            &start,
+            &stop,
+            &step,
+            &slicelength,
+        );
+        if (rc < 0) return error.PyError;
+        return .{
+            .start = @intCast(start),
+            .stop = @intCast(stop),
+            .step = @intCast(step),
+            .length = @intCast(slicelength),
+        };
     }
 };
 
@@ -352,7 +507,7 @@ pub const Module = extern struct {
         _ = class_def.name;
         _ = class_def.doc;
         const type_obj = class_def.ready_fn();
-        const py_type: *Object = @ptrCast(type_obj);
+        const py_type: *Object = @ptrCast(@alignCast(type_obj));
         try self.addObjectRef(name, py_type);
     }
 
