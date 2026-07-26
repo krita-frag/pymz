@@ -3,7 +3,7 @@
 //! This namespace holds the concrete Python object wrappers and value
 //! constructors. Higher-level declaration helpers live in `py/decl.zig`.
 
-const interface = @import("../interface.zig");
+const interface = @import("pymz_backend");
 
 pub const backend = interface.Backend();
 
@@ -15,9 +15,7 @@ pub const RawArgs = backend.RawArgs;
 
 pub const ExceptionBase = backend.ExceptionBase;
 pub const Exception = backend.Exception;
-pub const Repr = backend.Repr;
 pub const Str = backend.Str;
-pub const Unicode = backend.Unicode;
 pub const Bytes = backend.Bytes;
 pub const ByteArray = backend.ByteArray;
 pub const Int = backend.Int;
@@ -53,7 +51,7 @@ pub fn string(value: []const u8) Result(*Object) {
 
 /// Create a Unicode text object (`unicode` on Python 2, `str` on Python 3).
 pub fn unicode(value: []const u8) Result(*Object) {
-    return @ptrCast(try backend.Unicode.fromSlice(value));
+    return @ptrCast(try backend.unicodeFromSlice(value));
 }
 
 pub fn list(size: usize) Result(*Object) {
@@ -77,13 +75,19 @@ pub fn bytearray(value: []const u8) Result(*Object) {
 }
 
 pub fn set(items: []const *Object) Result(*Object) {
+    comptime if (!interface.backendSpec().capabilities.set_model)
+        @compileError("selected backend does not implement set values");
     return @ptrCast(try backend.Set.fromSlice(items));
 }
 
 pub fn frozenset(items: []const *Object) Result(*Object) {
+    comptime if (!interface.backendSpec().capabilities.set_model)
+        @compileError("selected backend does not implement frozenset values");
     return @ptrCast(try backend.FrozenSet.fromSlice(items));
 }
 
 pub fn slice(start: ?isize, stop: ?isize, step: ?isize) Result(*Object) {
+    comptime if (!interface.backendSpec().capabilities.slice_model)
+        @compileError("selected backend does not implement slice values");
     return @ptrCast(try backend.Slice.new(start, stop, step));
 }

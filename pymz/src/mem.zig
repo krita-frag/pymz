@@ -1,8 +1,8 @@
 //! Memory allocation and ownership conventions for pymz.
 //!
 //! By default pymz uses the C allocator so that allocations made on the Zig
-//! side can be freed by Python and vice versa.  Users may override this with
-//! any allocator by calling `pymz.setAllocator` before creating Python objects.
+//! side can be freed by Python and vice versa.  Tests may override this via
+//! `setAllocator()` before creating Python objects.
 //!
 //! Ownership conventions used throughout pymz:
 //!
@@ -34,20 +34,19 @@
 const std = @import("std");
 
 /// The allocator used for all pymz-internal allocations.
+///
+/// Defaults to `std.heap.c_allocator`, which is required for CPython extension
+/// code because allocations made on the Zig side may be freed by Python (via
+/// `free()` from libc) and vice versa.
+///
+/// Tests can override this with a debug allocator (e.g.
+/// `std.heap.GeneralPurposeAllocator`) by calling `setAllocator()` at the
+/// start of the test runner. The allocator MUST be set before any Python
+/// objects are created and MUST NOT be changed afterwards.
 pub var allocator: std.mem.Allocator = std.heap.c_allocator;
 
-/// Zero-sized marker type for documentation: a new-reference `*Object`.
-/// Functions accepting or returning this type transfer ownership to the caller.
-pub const Owned = struct {};
-
-/// Zero-sized marker type for documentation: a borrowed `*Object` or slice.
-/// The resource remains owned by the source and is only valid while the source
-/// is alive.
-pub const Borrowed = struct {};
-
-/// Replace the allocator used by pymz.  Must be called before any pymz
-/// function that may allocate memory.  The allocator must remain valid for the
-/// lifetime of the Python interpreter process.
-pub fn setAllocator(new_allocator: std.mem.Allocator) void {
-    allocator = new_allocator;
+/// Override the global allocator. Only makes sense at startup (e.g. in a test
+/// runner) before any pymz objects have been allocated.
+pub fn setAllocator(alloc: std.mem.Allocator) void {
+    allocator = alloc;
 }

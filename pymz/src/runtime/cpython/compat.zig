@@ -6,12 +6,8 @@
 //! and produce no runtime overhead.
 
 const std = @import("std");
-const c = @import("c.zig").c;
+const c = @import("python_c");
 const version = @import("version.zig");
-
-// ============================================================================
-// C API predicate helpers
-// ============================================================================
 
 /// Convert a C API predicate that returns exactly `1` (true) or `0` (false)
 /// into a Zig `bool`. Type-check macros such as `PyLong_Check` and
@@ -31,10 +27,6 @@ pub inline fn cApiTriState(value: c_int) !bool {
     if (value == 0) return false;
     return error.PyError;
 }
-
-// ============================================================================
-// Integer creation and extraction
-// ============================================================================
 
 /// Create a new Python int object from a signed integer.
 pub inline fn intFromSigned(value: isize) ?*c.PyObject {
@@ -64,11 +56,11 @@ pub inline fn intFromUnsigned(value: usize) ?*c.PyObject {
 /// Extract a signed integer from a Python int-compatible object.
 /// The caller must ensure `obj` is an int or long; otherwise a Python
 /// exception may be set and `error.PyError` is returned.
+///
+/// `PyLong_AsLongLong` is available on both Python 2 and 3, so no version
+/// branch is needed.
 pub inline fn intAsSigned(obj: *c.PyObject) !i64 {
-    const v = if (version.is_py3)
-        c.PyLong_AsLongLong(obj)
-    else
-        c.PyLong_AsLongLong(obj);
+    const v = c.PyLong_AsLongLong(obj);
     if (v == -1 and c.PyErr_Occurred() != null) return error.PyError;
     return @intCast(v);
 }
@@ -82,10 +74,6 @@ pub inline fn intAsUnsigned(obj: *c.PyObject) !u64 {
     if (v == sentinel and c.PyErr_Occurred() != null) return error.PyError;
     return @intCast(v);
 }
-
-// ============================================================================
-// String / bytes creation and extraction
-// ============================================================================
 
 /// Return true if `obj` is a text string. On Python 3 this is `str`; on
 /// Python 2 `str` is the native bytes type, so we accept `PyString` as the
@@ -155,18 +143,9 @@ pub inline fn bytesAsSlice(obj: *c.PyObject, size: *c.Py_ssize_t) ?[*c]u8 {
     if (rc < 0) return null;
     return ptr;
 }
-
-// ============================================================================
-// Bytearray helpers
-// ============================================================================
-
-/// Return true if `obj` is a `bytearray`. On Python 2 `bytearray` exists but
-/// is not commonly used, so we fall back to a `str` check.
+/// Return true if `obj` is a `bytearray` on both Python 2 and Python 3.
 pub inline fn byteArrayCheck(obj: *c.PyObject) bool {
-    if (version.is_py3) {
-        return cApiBool(c.PyByteArray_Check(obj));
-    }
-    return cApiBool(c.PyString_Check(obj));
+    return cApiBool(c.PyByteArray_Check(obj));
 }
 
 /// Create a new `bytearray` from a byte slice.

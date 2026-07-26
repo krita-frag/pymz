@@ -5,12 +5,10 @@
     .minimum_zig_version = "0.16.0-dev.2979+e93834410",
     .dependencies = .{
         .pymz = .{ .path = "../pymz" },
-        .@"pymz-build" = .{ .path = "../pymz-build" },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
-        "templates",
     },
 }

@@ -1,9 +1,9 @@
 //! Exception export descriptors.
 
+const std = @import("std");
 const common = @import("common.zig");
 const errors = @import("../errors.zig");
 const types = @import("../types.zig");
-const stubs = @import("../stubs.zig");
 
 pub const ExportKind = common.ExportKind;
 pub const Error = errors.Error;
@@ -26,22 +26,29 @@ fn ExceptionDescriptor(
         pub const base = _base;
         pub const doc = _doc;
 
-        pub var value: errors.Exception = undefined;
+        // `null` until `registerWithName` runs. The module-init path always
+        // registers descriptors before user code can reach `raise`, so the
+        // `assert` in `get` catches descriptor misuse (e.g. raising an
+        // exception whose owning module was never initialized) instead of
+        // silently dereferencing `undefined`.
+        pub var value: ?errors.Exception = null;
+
+        inline fn get() errors.Exception {
+            std.debug.assert(value != null);
+            return value.?;
+        }
 
         pub fn registerWithName(mod: *types.Module, comptime export_name: [:0]const u8) Error!void {
-            value = try errors.createException(mod, export_name, base, doc);
+            const created = try errors.createException(mod, export_name, base, doc);
+            value = created;
         }
 
         pub fn raise(msg: [:0]const u8) Error {
-            return value.raise(msg);
+            return get().raise(msg);
         }
 
         pub fn raiseFormat(comptime fmt: []const u8, args: anytype) Error {
-            return value.raiseFormat(fmt, args);
-        }
-
-        pub fn stubWithName(comptime export_name: [:0]const u8) stubs.Stub {
-            return stubs.exceptionStub(export_name, if (doc) |d| d else "");
+            return get().raiseFormat(fmt, args);
         }
     };
 }

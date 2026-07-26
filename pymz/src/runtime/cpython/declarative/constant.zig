@@ -4,7 +4,6 @@ const common = @import("common.zig");
 const convert = @import("../convert.zig");
 const object = @import("../object.zig");
 const types = @import("../types.zig");
-const stubs = @import("../stubs.zig");
 
 pub const ExportKind = common.ExportKind;
 pub const Error = @import("../errors.zig").Error;
@@ -38,10 +37,6 @@ fn ConstantDescriptor(comptime _init: anytype) type {
             };
             defer obj.decref();
             try mod.addObjectRef(export_name, obj);
-        }
-
-        pub fn stubWithName(comptime export_name: [:0]const u8) stubs.Stub {
-            return stubs.constant(export_name, "Any", "");
         }
     };
 }

@@ -1,16 +1,10 @@
 [build-system]
-requires = ["pymz-backend"]
-build-backend = "pymz_backend"
+requires = ["pymz-tool"]
+build-backend = "pymz_tool"
 
 [project]
 name = "jsonz"
 version = "0.1.0"
 description = "Fast, Zig-backed JSON utilities for Python"
 requires-python = ">=3.8"
-dependencies = ["pymz-loader"]
-
-[tool.pymz_backend]
-module = "_jsonz"
-distribution = "jsonz"
-package-dir = "python"
-release = true
+dependencies = ["pymz-tool"]

@@ -1,35 +1,87 @@
 const std = @import("std");
 const pymz = @import("pymz");
+const py = pymz.py;
+const v = py.value;
+const d = py.decl;
 
 // ============================================================================
-// jsonz — a practical Zig-backed JSON extension for Python.
+// jsonz — 一个可独立运行的 Zig JSON 扩展示例。
 //
-// Demonstrates every major pymz feature in a single usable module:
-//   * typed positional functions
-//   * keyword-argument functions
-//   * custom exceptions
-//   * complex type conversion (list / dict / primitive <-> Zig JSON values)
-//   * Zig struct exposed as a Python class with public fields and methods
-//   * Python 2 / 3 comptime compatibility
+// 提供比 Python 标准库更快的 JSON 解析与序列化，并展示 pymz 的常用 API。
 // ============================================================================
 
-const JsonError = pymz.exception(.value_error, "JSON processing error.");
+const gpa = std.heap.c_allocator;
 
-// ----------------------------------------------------------------------------
-// Zig <-> Python JSON value conversion helpers
-// ----------------------------------------------------------------------------
+fn validateJsonLimitedImpl(text: []const u8) v.Result(bool) {
+    // Minimal structural validation for the limited/stable-ABI backend where
+    // `std.json` is not available. We verify that the text is non-empty,
+    // starts with a valid JSON token, and has balanced `[]`/`{}` nesting.
+    if (text.len == 0) return false;
+    var i: usize = 0;
+    while (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n' or text[i] == '\r')) : (i += 1) {}
+    if (i >= text.len) return false;
+    const first = text[i];
+    switch (first) {
+        '{', '[', '"', '-', '0'...'9', 't', 'f', 'n' => {},
+        else => return false,
+    }
+    // Bracket balance check (does not validate full grammar).
+    var depth_brace: i32 = 0;
+    var depth_bracket: i32 = 0;
+    var in_string = false;
+    var escape = false;
+    for (text) |byte| {
+        if (in_string) {
+            if (escape) {
+                escape = false;
+            } else if (byte == '\\') {
+                escape = true;
+            } else if (byte == '"') {
+                in_string = false;
+            }
+        } else if (byte == '"') {
+            in_string = true;
+        } else if (byte == '{') {
+            depth_brace += 1;
+        } else if (byte == '}') {
+            depth_brace -= 1;
+            if (depth_brace < 0) return false;
+        } else if (byte == '[') {
+            depth_bracket += 1;
+        } else if (byte == ']') {
+            depth_bracket -= 1;
+            if (depth_bracket < 0) return false;
+        }
+    }
+    return depth_brace == 0 and depth_bracket == 0 and !in_string;
+}
 
-/// Recursively convert a parsed `std.json.Value` into a Python object.
-fn jsonValueToPy(value: std.json.Value) pymz.Result(*pymz.Value) {
-    const obj: *pymz.Value = switch (value) {
-        .null => @ptrCast(pymz.none()),
-        .bool => |b| @ptrCast(pymz.boolean(b)),
-        .integer => |i| try pymz.integer(i),
-        .float => |f| try pymz.floating(f),
-        .number_string => |s| try pymz.string(s),
-        .string => |s| try pymz.string(s),
+fn validateJsonFullImpl(text: []const u8) v.Result(bool) {
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, text, .{}) catch {
+        return false;
+    };
+    parsed.deinit();
+    return true;
+}
+
+const validate_json_impl = if (pymz.platform.is_limited()) validateJsonLimitedImpl else validateJsonFullImpl;
+
+const validate_json = d.positionalFunction(validate_json_impl, .{
+    .doc = "Return True if text is valid JSON.",
+    .param_names = &.{"text"},
+});
+
+const JsonError = d.exception(.value_error, "JSON processing error.");
+
+fn jsonValueToPy(value: std.json.Value) v.Result(*v.Object) {
+    return switch (value) {
+        .null => v.none(),
+        .bool => |b| v.boolean(b),
+        .integer => |i| try v.integer(i),
+        .float => |f| try v.floating(f),
+        .number_string, .string => |s| try v.string(s),
         .array => |arr| blk: {
-            const list = try pymz.list(arr.items.len);
+            const list = try v.list(arr.items.len);
             errdefer list.decref();
             for (arr.items, 0..) |item, i| {
                 const py_item = try jsonValueToPy(item);
@@ -38,208 +90,128 @@ fn jsonValueToPy(value: std.json.Value) pymz.Result(*pymz.Value) {
             break :blk list;
         },
         .object => |map| blk: {
-            const dict = try pymz.dict();
+            const dict = try v.dict();
             errdefer dict.decref();
             var it = map.iterator();
             while (it.next()) |entry| {
                 const py_value = try jsonValueToPy(entry.value_ptr.*);
                 defer py_value.decref();
-                const key = try pymz.string(entry.key_ptr.*);
+                const key = try v.string(entry.key_ptr.*);
                 defer key.decref();
                 try dict.dictSet(key, py_value);
             }
             break :blk dict;
         },
     };
-    return obj;
 }
 
-/// Recursively free a `std.json.Value` tree that we built from Python objects.
-fn freeJsonValue(value: *std.json.Value, allocator: std.mem.Allocator) void {
-    switch (value.*) {
-        .string => |s| allocator.free(s),
-        .number_string => |s| allocator.free(s),
-        .array => |*arr| {
-            for (arr.items) |*item| freeJsonValue(item, allocator);
-            arr.deinit();
-        },
-        .object => |*map| {
-            var it = map.iterator();
-            while (it.next()) |entry| {
-                allocator.free(entry.key_ptr.*);
-                freeJsonValue(entry.value_ptr, allocator);
-            }
-            map.deinit();
-        },
-        else => {},
-    }
-}
-
-/// Recursively convert a Python object into a `std.json.Value` tree.
-fn pyToJson(obj: *pymz.Value) pymz.Result(std.json.Value) {
-    if (obj.isNone()) return .null;
-    if (obj.isBool()) {
-        return .{ .bool = obj.asBool() };
-    }
-    if (obj.isInt()) {
-        return .{ .integer = try obj.asInt(i64) };
-    }
-    if (obj.isFloat()) {
-        return .{ .float = try obj.asFloat(f64) };
-    }
-    if (obj.isString()) {
-        const slice = obj.asString();
-        const copy = std.heap.c_allocator.dupe(u8, slice) catch return error.PyError;
-        return .{ .string = copy };
-    }
-    if (obj.isList() or obj.isTuple()) {
-        var arr = std.json.Array.init(std.heap.c_allocator);
-        errdefer {
-            for (arr.items) |*item| freeJsonValue(item, std.heap.c_allocator);
-            arr.deinit();
-        }
-        const len = try obj.sequenceLength();
-        for (0..len) |i| {
-            const item_obj = obj.sequenceGet(i).?;
-            const json_item = try pyToJson(item_obj);
-            arr.append(json_item) catch return error.PyError;
-        }
-        return .{ .array = arr };
-    }
-    if (obj.isDict()) {
-        var map = std.json.ObjectMap.init(std.heap.c_allocator);
-        errdefer {
-            var it = map.iterator();
-            while (it.next()) |entry| {
-                std.heap.c_allocator.free(entry.key_ptr.*);
-                freeJsonValue(entry.value_ptr, std.heap.c_allocator);
-            }
-            map.deinit();
-        }
-        const items = try obj.dictItems();
-        defer items.decref();
-        const len = try items.sequenceLength();
-        for (0..len) |i| {
-            const pair = items.sequenceGet(i).?;
-            const key_obj = pair.sequenceGet(0).?;
-            const val_obj = pair.sequenceGet(1).?;
-            const key_str = key_obj.asString();
-            const key_copy = std.heap.c_allocator.dupe(u8, key_str) catch return error.PyError;
-            errdefer std.heap.c_allocator.free(key_copy);
-            const json_val = try pyToJson(val_obj);
-            errdefer {
-                var mutable = json_val;
-                freeJsonValue(&mutable, std.heap.c_allocator);
-            }
-            map.put(key_copy, json_val) catch return error.PyError;
-        }
-        return .{ .object = map };
-    }
-    return JsonError.raise("object is not JSON serializable");
-}
-
-// ----------------------------------------------------------------------------
-// Module functions
-// ----------------------------------------------------------------------------
-
-fn parseJsonImpl(text: []const u8) pymz.Result(*pymz.Value) {
-    const parsed = std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, text, .{}) catch {
+fn parseJsonImpl(text: []const u8) v.Result(*v.Object) {
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, text, .{}) catch {
         return JsonError.raise("invalid JSON");
     };
     defer parsed.deinit();
     return jsonValueToPy(parsed.value);
 }
 
-const parse_json = pymz.function(parseJsonImpl, "Parse a JSON string into Python objects.");
+const parse_json = d.positionalFunction(parseJsonImpl, .{
+    .doc = "Parse a JSON string into Python objects.",
+    .param_names = &.{"text"},
+    .limited = false,
+});
 
 const DumpArgs = struct {
-    obj: *pymz.Value,
+    obj: *v.Object,
     indent: ?i64 = null,
 };
 
-fn dumpJsonImpl(args: pymz.Args(DumpArgs)) pymz.Result([]const u8) {
+fn dumpJsonImpl(args: v.Args(DumpArgs)) v.Result([]const u8) {
     var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(std.heap.c_allocator);
-    try appendPyJson(&out, args.value.obj, args.value.indent, 0);
-    return out.toOwnedSlice(std.heap.c_allocator) catch return error.PyError;
+    errdefer out.deinit(gpa);
+    try appendPyJson(gpa, &out, args.value.obj, args.value.indent, 0);
+    return out.toOwnedSlice(gpa) catch return error.PyError;
 }
 
-const dump_json = pymz.kwFunction(dumpJsonImpl, "Serialize a Python object to a JSON string.");
+const dump_json = d.kwFunction(dumpJsonImpl, .{
+    .doc = "Serialize a Python object to a JSON string.",
+    .limited = false,
+});
 
 fn appendPyJson(
+    allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
-    obj: *pymz.Value,
+    obj: *v.Object,
     indent: ?i64,
     depth: usize,
-) pymz.Result(void) {
+) v.Result(void) {
     if (obj.isNone()) {
-        return appendSlice(out, "null");
+        return appendSlice(allocator, out, "null");
     }
     if (obj.isBool()) {
-        return appendSlice(out, if (obj.asBool()) "true" else "false");
+        return appendSlice(allocator, out, if (obj.asBool()) "true" else "false");
     }
     if (obj.isInt()) {
         const value = try obj.asInt(i64);
-        const text = std.fmt.allocPrint(std.heap.c_allocator, "{d}", .{value}) catch {
+        const text = std.fmt.allocPrint(allocator, "{d}", .{value}) catch {
             return error.PyError;
         };
-        defer std.heap.c_allocator.free(text);
-        return appendSlice(out, text);
+        defer allocator.free(text);
+        return appendSlice(allocator, out, text);
     }
     if (obj.isFloat()) {
         const value = try obj.asFloat(f64);
-        const text = std.fmt.allocPrint(std.heap.c_allocator, "{d}", .{value}) catch {
+        const text = std.fmt.allocPrint(allocator, "{d}", .{value}) catch {
             return error.PyError;
         };
-        defer std.heap.c_allocator.free(text);
-        return appendSlice(out, text);
+        defer allocator.free(text);
+        return appendSlice(allocator, out, text);
     }
-
     if (obj.isString()) {
-        return appendJsonString(out, obj.asString());
+        return appendJsonString(allocator, out, try obj.asString());
     }
     if (obj.isList() or obj.isTuple()) {
-        return appendPySequenceJson(out, obj, indent, depth);
+        return appendPySequenceJson(allocator, out, obj, indent, depth);
     }
     if (obj.isDict()) {
-        return appendPyDictJson(out, obj, indent, depth);
+        return appendPyDictJson(allocator, out, obj, indent, depth);
     }
     return JsonError.raise("object is not JSON serializable");
 }
 
 fn appendPySequenceJson(
+    allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
-    obj: *pymz.Value,
+    obj: *v.Object,
     indent: ?i64,
     depth: usize,
-) pymz.Result(void) {
+) v.Result(void) {
     const len = try obj.sequenceLength();
-    try appendSlice(out, "[");
+    try appendSlice(allocator, out, "[");
     for (0..len) |index| {
         const item = obj.sequenceGet(index).?;
         if (index > 0) {
-            try appendSlice(out, ",");
+            try appendSlice(allocator, out, ",");
         }
-        try appendPrettySeparator(out, indent, depth + 1);
-        try appendPyJson(out, item, indent, depth + 1);
+        try appendPrettySeparator(allocator, out, indent, depth + 1);
+        try appendPyJson(allocator, out, item, indent, depth + 1);
     }
     if (len > 0) {
-        try appendPrettySeparator(out, indent, depth);
+        try appendPrettySeparator(allocator, out, indent, depth);
     }
-    try appendSlice(out, "]");
+    try appendSlice(allocator, out, "]");
 }
 
 fn appendPyDictJson(
+    allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
-    obj: *pymz.Value,
+    obj: *v.Object,
     indent: ?i64,
     depth: usize,
-) pymz.Result(void) {
+) v.Result(void) {
     const items = try obj.dictItems();
     defer items.decref();
 
     const len = try items.sequenceLength();
-    try appendSlice(out, "{");
+    try appendSlice(allocator, out, "{");
     for (0..len) |index| {
         const pair = items.sequenceGet(index).?;
         const key_obj = pair.sequenceGet(0).?;
@@ -248,94 +220,268 @@ fn appendPyDictJson(
             return JsonError.raise("JSON object keys must be strings");
         }
         if (index > 0) {
-            try appendSlice(out, ",");
+            try appendSlice(allocator, out, ",");
         }
-        try appendPrettySeparator(out, indent, depth + 1);
-        try appendJsonString(out, key_obj.asString());
-        try appendSlice(out, if (indent == null) ":" else ": ");
-        try appendPyJson(out, value_obj, indent, depth + 1);
+        try appendPrettySeparator(allocator, out, indent, depth + 1);
+        try appendJsonString(allocator, out, try key_obj.asString());
+        try appendSlice(allocator, out, if (indent == null) ":" else ": ");
+        try appendPyJson(allocator, out, value_obj, indent, depth + 1);
     }
     if (len > 0) {
-        try appendPrettySeparator(out, indent, depth);
+        try appendPrettySeparator(allocator, out, indent, depth);
     }
-    try appendSlice(out, "}");
+    try appendSlice(allocator, out, "}");
 }
 
-fn appendJsonString(out: *std.ArrayList(u8), value: []const u8) pymz.Result(void) {
-    try appendSlice(out, "\"");
+fn appendJsonString(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    value: []const u8,
+) v.Result(void) {
+    try appendSlice(allocator, out, "\"");
     for (value) |byte| {
         switch (byte) {
-            '"' => try appendSlice(out, "\\\""),
-            '\\' => try appendSlice(out, "\\\\"),
-            '\n' => try appendSlice(out, "\\n"),
-            '\r' => try appendSlice(out, "\\r"),
-            '\t' => try appendSlice(out, "\\t"),
-            else => out.append(std.heap.c_allocator, byte) catch return error.PyError,
+            '"' => try appendSlice(allocator, out, "\\\""),
+            '\\' => try appendSlice(allocator, out, "\\\\"),
+            '\n' => try appendSlice(allocator, out, "\\n"),
+            '\r' => try appendSlice(allocator, out, "\\r"),
+            '\t' => try appendSlice(allocator, out, "\\t"),
+            '\x08' => try appendSlice(allocator, out, "\\b"),
+            '\x0c' => try appendSlice(allocator, out, "\\f"),
+            0x00...0x07, 0x0b, 0x0e...0x1f => {
+                const text = std.fmt.allocPrint(allocator, "\\u{x:0>4}", .{byte}) catch {
+                    return error.PyError;
+                };
+                defer allocator.free(text);
+                try appendSlice(allocator, out, text);
+            },
+            else => out.append(allocator, byte) catch return error.PyError,
         }
     }
-    try appendSlice(out, "\"");
+    try appendSlice(allocator, out, "\"");
 }
 
 fn appendPrettySeparator(
+    allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
     indent: ?i64,
     depth: usize,
-) pymz.Result(void) {
+) v.Result(void) {
     const spaces_count = if (indent) |value| @as(usize, @intCast(@max(value, 0))) else return;
-    try appendSlice(out, "\n");
+    try appendSlice(allocator, out, "\n");
     for (0..(spaces_count * depth)) |_| {
-        out.append(std.heap.c_allocator, ' ') catch return error.PyError;
+        out.append(allocator, ' ') catch return error.PyError;
     }
 }
 
-fn appendSlice(out: *std.ArrayList(u8), value: []const u8) pymz.Result(void) {
-    out.appendSlice(std.heap.c_allocator, value) catch return error.PyError;
+fn appendSlice(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: []const u8) v.Result(void) {
+    out.appendSlice(allocator, value) catch return error.PyError;
 }
 
-fn validateJsonImpl(text: []const u8) pymz.Result(bool) {
-    const parsed = std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, text, .{}) catch {
-        return false;
-    };
-    parsed.deinit();
-    return true;
+fn echoBytesImpl(data: []u8) v.Result([]u8) {
+    return gpa.dupe(u8, data) catch return error.PyError;
 }
 
-const validate_json = pymz.function(validateJsonImpl, "Return True if text is valid JSON.");
+const echo_bytes = d.positionalFunction(echoBytesImpl, .{
+    .doc = "Return the input bytes unchanged.",
+    .param_names = &.{"data"},
+    .limited = false,
+});
 
-// ----------------------------------------------------------------------------
-// JsonPath — a tiny Python class wrapping a parsed dot-path query.
-// ----------------------------------------------------------------------------
+const ProtocolDemoImpl = struct {
+    _data: []u8,
 
-pub const JsonPathImpl = struct {
-    segments: std.ArrayList([]const u8),
-    pub const __pymz_constructor_param_names__ = "pattern";
-    pub const __pymz_method_param_names__ = .{
-        .find = "root",
-    };
-    pub const __repr__ = pymz.Repr(repr);
+    pub const __pymz_constructor_param_names__: []const []const u8 = &.{"text"};
 
-    fn repr(_: *const JsonPathImpl) []const u8 {
+    pub fn __new__(text: []const u8) v.Result(ProtocolDemoImpl) {
+        const duped = gpa.dupe(u8, text) catch return error.OutOfMemory;
+        return .{ ._data = duped };
+    }
+
+    pub fn __del__(self: *ProtocolDemoImpl) void {
+        gpa.free(self._data);
+    }
+
+    pub fn __enter__(self: *ProtocolDemoImpl) *ProtocolDemoImpl {
+        return self;
+    }
+
+    pub fn __exit__(
+        self: *ProtocolDemoImpl,
+        exc_type: ?*v.Object,
+        exc_value: ?*v.Object,
+        exc_tb: ?*v.Object,
+    ) void {
+        _ = self;
+        _ = exc_type;
+        _ = exc_value;
+        _ = exc_tb;
+    }
+
+    pub fn __buffer__(self: *const ProtocolDemoImpl) []const u8 {
+        return self._data;
+    }
+};
+
+const ProtocolDemo = d.class(ProtocolDemoImpl, .{
+    .doc = "Context manager and byte buffer demo.",
+    .limited = false,
+});
+
+const MatrixBufferImpl = struct {
+    pub const shape = [_]usize{ 2, 2 };
+    pub const strides = [_]isize{ 2, 1 };
+
+    _data: [4]u8,
+
+    pub fn __new__() MatrixBufferImpl {
+        return .{ ._data = .{ 1, 2, 3, 4 } };
+    }
+
+    pub fn __buffer__(self: *const MatrixBufferImpl) v.Buffer {
+        return .{
+            .ptr = @ptrCast(@constCast(self._data[0..].ptr)),
+            .shape = MatrixBufferImpl.shape[0..],
+            .strides = MatrixBufferImpl.strides[0..],
+            .format = "B",
+            .readonly = true,
+        };
+    }
+};
+
+const MatrixBuffer = d.class(MatrixBufferImpl, .{
+    .doc = "A read-only 2x2 byte matrix.",
+    .limited = false,
+});
+
+const BaseCounterImpl = struct {
+    _count: i64,
+
+    pub fn __new__() BaseCounterImpl {
+        return .{ ._count = 0 };
+    }
+
+    pub fn increment(self: *BaseCounterImpl) i64 {
+        self._count += 1;
+        return self._count;
+    }
+};
+
+const BaseCounter = d.class(BaseCounterImpl, .{
+    .doc = "Counter that increments by one.",
+    .limited = false,
+});
+
+const BaseCounterDef = BaseCounter.classdefWithName("BaseCounter");
+
+const DerivedCounterImpl = struct {
+    _count: i64 = 0,
+    _step: i64,
+
+    pub const __pymz_constructor_param_names__: []const []const u8 = &.{"step"};
+
+    pub fn __new__(step: i64) DerivedCounterImpl {
+        return .{ ._count = 0, ._step = step };
+    }
+
+    pub fn increment(self: *DerivedCounterImpl) i64 {
+        self._count += self._step;
+        return self._count;
+    }
+};
+
+const DerivedCounter = d.classWithBase("DerivedCounter", DerivedCounterImpl, &BaseCounterDef, .{
+    .doc = "Counter that increments by a fixed step.",
+    .limited = false,
+});
+
+var gc_node_deallocs: usize = 0;
+
+const GCNodeImpl = struct {
+    _value: i64,
+    _child: ?*v.Object = null,
+
+    pub const __pymz_constructor_param_names__: []const []const u8 = &.{"value"};
+    pub const __pymz_method_param_names__ = .{ .set_child = "child" };
+
+    pub fn __new__(value: i64) GCNodeImpl {
+        return .{ ._value = value, ._child = null };
+    }
+
+    pub fn __del__(self: *GCNodeImpl) void {
+        _ = self;
+        gc_node_deallocs += 1;
+    }
+
+    pub fn set_child(self: *GCNodeImpl, child: ?*v.Object) void {
+        if (self._child) |old| {
+            old.decref();
+        }
+        self._child = if (child) |obj| obj.newref() else null;
+    }
+
+    pub fn __traverse__(
+        self: *const GCNodeImpl,
+        visit: *const fn (*v.Object, ?*anyopaque) callconv(.c) c_int,
+        arg: ?*anyopaque,
+    ) !void {
+        if (self._child) |child| {
+            if (visit(child, arg) != 0) return error.VisitFailed;
+        }
+    }
+
+    pub fn __clear__(self: *GCNodeImpl) !void {
+        if (self._child) |child| {
+            child.decref();
+            self._child = null;
+        }
+    }
+};
+
+const GCNode = d.class(GCNodeImpl, .{
+    .doc = "A GC-managed node with an optional child.",
+    .limited = false,
+});
+
+fn gcNodeDeallocCountImpl() usize {
+    return gc_node_deallocs;
+}
+
+const gc_node_dealloc_count = d.function(gcNodeDeallocCountImpl, .{
+    .doc = "Return the number of GCNode deallocations.",
+    .limited = false,
+});
+
+const JsonPathImpl = struct {
+    _segments: std.ArrayList([]const u8),
+    segment_count: usize,
+
+    pub const __pymz_readonly_fields__ = .{ .segment_count = true };
+    pub const __pymz_method_param_names__ = .{ .find = "root" };
+
+    pub fn __repr__(self: *const JsonPathImpl) []const u8 {
+        _ = self;
         return "JsonPath";
     }
 
-    pub fn __new__(pattern: []const u8) JsonPathImpl {
+    pub fn __new__(pattern: []const u8) v.Result(JsonPathImpl) {
         var segments: std.ArrayList([]const u8) = .empty;
         errdefer {
-            for (segments.items) |s| std.heap.c_allocator.free(s);
-            segments.deinit(std.heap.c_allocator);
+            for (segments.items) |s| gpa.free(s);
+            segments.deinit(gpa);
         }
         var it = std.mem.splitScalar(u8, pattern, '.');
         while (it.next()) |seg| {
             if (seg.len == 0) continue;
-            const copy = std.heap.c_allocator.dupe(u8, seg) catch @panic("out of memory");
-            segments.append(std.heap.c_allocator, copy) catch @panic("out of memory");
+            const copy = gpa.dupe(u8, seg) catch return error.OutOfMemory;
+            segments.append(gpa, copy) catch return error.OutOfMemory;
         }
-        return .{ .segments = segments };
+        return .{ ._segments = segments, .segment_count = segments.items.len };
     }
 
-    pub fn find(self: *const JsonPathImpl, root: *pymz.Value) pymz.Result(*pymz.Value) {
+    pub fn find(self: *const JsonPathImpl, root: *v.Object) v.Result(*v.Object) {
         var current = root;
-        for (self.segments.items) |seg| {
+        for (self._segments.items) |seg| {
             if (current.isList()) {
                 const idx = std.fmt.parseInt(usize, seg, 10) catch {
                     return JsonError.raise("path segment is not a valid list index");
@@ -355,18 +501,25 @@ pub const JsonPathImpl = struct {
     }
 };
 
-const json_path_doc = "A dot-separated JSON path query.";
+const JsonPath = d.class(JsonPathImpl, .{
+    .doc = "A dot-separated JSON path query.",
+    .limited = false,
+});
 
-const JsonPath = pymz.class(JsonPathImpl, json_path_doc);
+const version_constant = d.constant("1.0.0");
 
-pub const pymz_module = pymz.module("_jsonz", .{
-    .__pymz_param_names__ = .{
-        .parse_json = "text",
-        .validate_json = "text",
-    },
+pub const pymz_module = d.module("_jsonz", .{
+    .__version__ = version_constant,
     .parse_json = parse_json,
     .dump_json = dump_json,
     .validate_json = validate_json,
+    .echo_bytes = echo_bytes,
+    .ProtocolDemo = ProtocolDemo,
+    .MatrixBuffer = MatrixBuffer,
+    .BaseCounter = BaseCounter,
+    .DerivedCounter = DerivedCounter,
+    .GCNode = GCNode,
+    .gc_node_dealloc_count = gc_node_dealloc_count,
     .JsonError = JsonError,
     .JsonPath = JsonPath,
 }, null, "Fast, Zig-backed JSON utilities for Python.");

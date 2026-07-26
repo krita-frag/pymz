@@ -1,0 +1,2 @@
+#!/bin/sh
+exec "${PYMZ_PYTHON}" -m pymz_tool.cli "$@"

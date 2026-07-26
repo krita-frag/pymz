@@ -6,19 +6,27 @@ __pycache__/
 *.pyd
 *.egg-info/
 .pytest_cache/
+.venv*/
+venv/
 
 # Zig
 zig-out/
 .zig-cache/
-zig-global-cache/
+.zig-global-cache/
+zig-out-*/
 
 # Build outputs
 dist/
 build/
+*.pyi
 
 # macOS / editor cruft
 .DS_Store
-.envrc
+
+# Environment variables
+.direnv/
+result
+result-*
 
 # Stray build artifacts
 envcheck.o

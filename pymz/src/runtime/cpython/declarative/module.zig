@@ -4,7 +4,6 @@ const std = @import("std");
 const common = @import("common.zig");
 const module_mod = @import("../module.zig");
 const types = @import("../types.zig");
-const stubs = @import("../stubs.zig");
 
 const Error = @import("../errors.zig").Error;
 const MethodDef = common.MethodDef;
@@ -52,23 +51,18 @@ fn ModuleDescriptor(
         pub const doc = _doc;
 
         const method_count = countDeclarations(.function);
-        const stub_count = countStubDeclarations();
+
+        fn isActive(comptime Declaration: type) bool {
+            return if (@hasDecl(Declaration, "is_active")) Declaration.is_active else true;
+        }
 
         fn countDeclarations(comptime kind: common.ExportKind) usize {
             var count: usize = 0;
             inline for (std.meta.fields(@TypeOf(declarations))) |field| {
                 if (comptime common.isMetaDeclarationField(field.name)) continue;
                 const Declaration = @field(declarations, field.name);
+                if (!isActive(Declaration)) continue;
                 if (Declaration.export_kind == kind) count += 1;
-            }
-            return count;
-        }
-
-        fn countStubDeclarations() usize {
-            var count: usize = 0;
-            inline for (std.meta.fields(@TypeOf(declarations))) |field| {
-                if (comptime common.isMetaDeclarationField(field.name)) continue;
-                count += 1;
             }
             return count;
         }
@@ -95,6 +89,7 @@ fn ModuleDescriptor(
             inline for (std.meta.fields(@TypeOf(declarations))) |field| {
                 if (comptime common.isMetaDeclarationField(field.name)) continue;
                 const Declaration = @field(declarations, field.name);
+                if (!isActive(Declaration)) continue;
                 if (Declaration.export_kind == .function) {
                     const param_names = parameterNamesFor(field.name, Declaration);
                     methods[index] = Declaration.methodDefWithNameAndParamNames(
@@ -108,45 +103,6 @@ fn ModuleDescriptor(
             return methods;
         }
 
-        fn buildStubs() [stub_count]stubs.Stub {
-            var result: [stub_count]stubs.Stub = undefined;
-            var index: usize = 0;
-            inline for (std.meta.fields(@TypeOf(declarations))) |field| {
-                if (comptime common.isMetaDeclarationField(field.name)) continue;
-                const Declaration = @field(declarations, field.name);
-                switch (Declaration.export_kind) {
-                    .function => {
-                        const param_names = parameterNamesFor(field.name, Declaration);
-                        result[index] = Declaration.stubWithNameAndParamNames(
-                            common.sentinelName(field.name),
-                            param_names,
-                        );
-                    },
-                    .class => {
-                        result[index] = Declaration.stubWithName(common.sentinelName(field.name));
-                    },
-                    .exception => {
-                        result[index] = Declaration.stubWithName(common.sentinelName(field.name));
-                    },
-                    .constant => {
-                        result[index] = Declaration.stubWithName(common.sentinelName(field.name));
-                    },
-                }
-                index += 1;
-            }
-            return result;
-        }
-
-        const StubHolder = struct {
-            pub const entries = buildStubs();
-        };
-
-        pub const stub_content = stubs.generate(name, StubHolder.entries[0..]);
-
-        pub fn stubContent() []const u8 {
-            return stub_content;
-        }
-
         const Runtime = struct {
             pub var method_table = buildMethodTable();
 
@@ -154,6 +110,7 @@ fn ModuleDescriptor(
                 inline for (std.meta.fields(@TypeOf(declarations))) |field| {
                     if (comptime common.isMetaDeclarationField(field.name)) continue;
                     const Declaration = @field(declarations, field.name);
+                    if (comptime !isActive(Declaration)) continue;
                     switch (Declaration.export_kind) {
                         .function => {},
                         .class => {
@@ -171,14 +128,12 @@ fn ModuleDescriptor(
         };
 
         comptime {
-            if (!stubs.isStubgenBuild()) {
-                _ = module_mod.moduleInit(
-                    name,
-                    @ptrCast(&Runtime.method_table),
-                    Runtime.initModule,
-                    doc,
-                );
-            }
+            _ = module_mod.moduleInit(
+                name,
+                @ptrCast(&Runtime.method_table),
+                Runtime.initModule,
+                doc,
+            );
         }
     };
 }

@@ -1,35 +1,29 @@
 const std = @import("std");
 
+// The public build-helper API lives directly in `core/main.zig`. Importing it
+// here re-exports `buildProject` and its option/struct types to consumers that
+// reach pymz-tool through `b.dependency("pymz-tool", .{}).builder`.
+pub const core = @import("src/core/main.zig");
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const exe = b.addExecutable(.{
-        .name = "pymz-tool",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
+    const pymz_dep = b.dependency("pymz", .{});
 
-    b.installArtifact(exe);
-
-    // ---
-    // Unit tests: collect `test` blocks from the tool sources and expose them
-    // via `zig build test`.
-    // ---
-    const tool_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+    // Unit tests for core/ modules (cross-compilation, python-config).
+    const test_module = b.createModule(.{
+        .root_source_file = b.path("src/core_tests.zig"),
         .target = target,
         .optimize = optimize,
     });
+    test_module.addImport("pymz", pymz_dep.module("pymz"));
 
     const tests = b.addTest(.{
-        .root_module = tool_module,
+        .root_module = test_module,
     });
 
     const run_tests = b.addRunArtifact(tests);
-    const test_step = b.step("test", "Run unit tests for pymz-tool");
+    const test_step = b.step("test", "Run unit tests for pymz-tool core");
     test_step.dependOn(&run_tests.step);
 }

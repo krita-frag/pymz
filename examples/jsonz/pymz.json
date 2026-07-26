@@ -1,0 +1,16 @@
+{
+    "module": "_jsonz",
+    "zig-target": "example",
+    "matrix": [
+        {
+            "runtime": "cpython3",
+            "versions": ["3.10", "3.11", "3.12", "3.13"],
+            "targets": ["native"]
+        },
+        {
+            "runtime": "cpython3-limited",
+            "versions": ["3.10"],
+            "targets": ["native"]
+        }
+    ]
+}

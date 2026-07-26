@@ -1,7 +1,7 @@
 //! Error handling helpers and custom exception support.
 
 const std = @import("std");
-const c = @import("c.zig").c;
+const c = @import("python_c");
 const version = @import("version.zig");
 const object = @import("object.zig");
 const types = @import("types.zig");
@@ -10,18 +10,27 @@ const Object = object.Object;
 
 /// Errors that can originate in Zig code and are propagated to Python.
 ///
-/// Most functions still return `error.PyError` because the Python exception state
-/// is already set.  Other variants let Zig code surface a native failure without
-/// manually setting a Python exception before returning.
+/// `PyError` is preserved as a catch-all meaning "a Python exception is already
+/// set".  The richer variants let Zig code surface a native failure without
+/// manually setting a Python exception before returning, and they map to the
+/// corresponding Python exception type in `mapError`.
 pub const Error = error{
     PyError,
     OutOfMemory,
-    Overflow,
     InvalidArgument,
-    IndexOutOfBounds,
-    KeyNotFound,
     InvalidUtf8,
     SystemError,
+    TypeError,
+    ValueError,
+    AttributeError,
+    KeyError,
+    IndexError,
+    OverflowError,
+    RuntimeError,
+    NotImplementedError,
+    BufferError,
+    StopIteration,
+    ZeroDivisionError,
 };
 
 /// Runtime-neutral public result type alias.
@@ -29,41 +38,51 @@ pub inline fn Result(comptime T: type) type {
     return Error!T;
 }
 
-/// Map a Zig error to an appropriate Python exception and return `error.PyError`.
+/// Map a Zig error to an appropriate Python exception.
 ///
 /// Callers should use this when a Zig function returns a non-`PyError` error and
 /// they want Python to see a meaningful exception type.  If a Python exception is
-/// already set, the existing exception is preserved.
-pub fn mapError(err: anyerror) Error!void {
+/// already set, the existing exception is preserved. The Python exception is
+/// always set before returning, so callers only need to return a failure indicator
+/// to Python.
+pub fn mapError(err: anyerror) void {
     if (err == error.PyError) {
-        return error.PyError;
+        return;
     }
 
     switch (err) {
-        error.OutOfMemory => c.PyErr_SetString(c.PyExc_MemoryError, @ptrCast("out of memory")),
-        error.Overflow => c.PyErr_SetString(c.PyExc_OverflowError, @ptrCast("integer overflow")),
+        error.OutOfMemory,
+        error.MemoryError,
+        => c.PyErr_SetString(c.PyExc_MemoryError, @ptrCast("out of memory")),
+        error.OverflowError => c.PyErr_SetString(c.PyExc_OverflowError, @ptrCast("integer overflow")),
         error.InvalidArgument => c.PyErr_SetString(c.PyExc_ValueError, @ptrCast("invalid argument")),
-        error.IndexOutOfBounds => c.PyErr_SetString(c.PyExc_IndexError, @ptrCast("index out of bounds")),
-        error.KeyNotFound => c.PyErr_SetString(c.PyExc_KeyError, @ptrCast("key not found")),
+        error.IndexError => c.PyErr_SetString(c.PyExc_IndexError, @ptrCast("index out of bounds")),
+        error.KeyError => c.PyErr_SetString(c.PyExc_KeyError, @ptrCast("key not found")),
         error.InvalidUtf8 => c.PyErr_SetString(c.PyExc_UnicodeDecodeError, @ptrCast("invalid UTF-8")),
         error.SystemError => c.PyErr_SetString(c.PyExc_SystemError, @ptrCast("system error")),
+        error.TypeError => c.PyErr_SetString(c.PyExc_TypeError, @ptrCast("type error")),
+        error.ValueError => c.PyErr_SetString(c.PyExc_ValueError, @ptrCast("value error")),
+        error.AttributeError => c.PyErr_SetString(c.PyExc_AttributeError, @ptrCast("attribute error")),
+        error.RuntimeError => c.PyErr_SetString(c.PyExc_RuntimeError, @ptrCast("runtime error")),
+        error.NotImplementedError => c.PyErr_SetString(c.PyExc_NotImplementedError, @ptrCast("not implemented")),
+        error.BufferError => c.PyErr_SetString(c.PyExc_BufferError, @ptrCast("buffer error")),
+        error.StopIteration => c.PyErr_SetString(c.PyExc_StopIteration, @ptrCast("")),
+        error.ZeroDivisionError => c.PyErr_SetString(c.PyExc_ZeroDivisionError, @ptrCast("division by zero")),
         else => {
             const printed = std.fmt.allocPrint(mem.allocator, "zig error: {s}", .{@errorName(err)}) catch {
                 c.PyErr_SetString(c.PyExc_RuntimeError, @ptrCast("zig function returned an error"));
-                return error.PyError;
+                return;
             };
             defer mem.allocator.free(printed);
             const msg = mem.allocator.allocSentinel(u8, printed.len, 0) catch {
                 c.PyErr_SetString(c.PyExc_RuntimeError, @ptrCast("zig function returned an error"));
-                return error.PyError;
+                return;
             };
             defer mem.allocator.free(msg);
             @memcpy(msg, printed);
             c.PyErr_SetString(c.PyExc_RuntimeError, @ptrCast(msg));
         },
     }
-
-    return error.PyError;
 }
 
 pub inline fn errorOccurred() ?*c.PyObject {
@@ -78,56 +97,70 @@ pub inline fn errorPrint() void {
     if (errorOccurred() != null) c.PyErr_Print();
 }
 
-pub inline fn typeError(comptime msg: [:0]const u8, args: anytype) Error!void {
-    return errorFormat(c.PyExc_TypeError, msg, args);
+/// Raise a Python exception with a formatted message. The exception class is
+/// a comptime parameter, providing a generic alternative to the per-type
+/// convenience wrappers below.
+pub inline fn raise(comptime exc: ?*c.PyObject, comptime msg: [:0]const u8, args: anytype) void {
+    errorFormat(exc, msg, args);
 }
 
-pub inline fn valueError(comptime msg: [:0]const u8, args: anytype) Error!void {
-    return errorFormat(c.PyExc_ValueError, msg, args);
+// Per-type convenience wrappers (one-liners forwarding to errorFormat).
+pub inline fn typeError(comptime msg: [:0]const u8, args: anytype) void {
+    errorFormat(c.PyExc_TypeError, msg, args);
+}
+pub inline fn valueError(comptime msg: [:0]const u8, args: anytype) void {
+    errorFormat(c.PyExc_ValueError, msg, args);
+}
+pub inline fn attributeError(comptime msg: [:0]const u8, args: anytype) void {
+    errorFormat(c.PyExc_AttributeError, msg, args);
+}
+pub inline fn keyError(comptime msg: [:0]const u8, args: anytype) void {
+    errorFormat(c.PyExc_KeyError, msg, args);
+}
+pub inline fn indexError(comptime msg: [:0]const u8, args: anytype) void {
+    errorFormat(c.PyExc_IndexError, msg, args);
+}
+pub inline fn systemError(comptime msg: [:0]const u8, args: anytype) void {
+    errorFormat(c.PyExc_SystemError, msg, args);
+}
+pub inline fn runtimeError(comptime msg: [:0]const u8, args: anytype) void {
+    errorFormat(c.PyExc_RuntimeError, msg, args);
+}
+pub inline fn notImplementedError(comptime msg: [:0]const u8, args: anytype) void {
+    errorFormat(c.PyExc_NotImplementedError, msg, args);
+}
+pub inline fn bufferError(comptime msg: [:0]const u8, args: anytype) void {
+    errorFormat(c.PyExc_BufferError, msg, args);
+}
+pub inline fn zeroDivisionError(comptime msg: [:0]const u8, args: anytype) void {
+    errorFormat(c.PyExc_ZeroDivisionError, msg, args);
+}
+pub inline fn overflowError(comptime msg: [:0]const u8, args: anytype) void {
+    errorFormat(c.PyExc_OverflowError, msg, args);
 }
 
-pub inline fn systemError(comptime msg: [:0]const u8, args: anytype) Error!void {
-    return errorFormat(c.PyExc_SystemError, msg, args);
-}
-
-pub inline fn runtimeError(comptime msg: [:0]const u8, args: anytype) Error!void {
-    return errorFormat(c.PyExc_RuntimeError, msg, args);
-}
-
-pub inline fn overflowError(comptime msg: [:0]const u8, args: anytype) Error!void {
-    return errorFormat(c.PyExc_OverflowError, msg, args);
-}
-
-pub inline fn errorFormat(exc: *c.PyObject, comptime format: []const u8, args: anytype) Error!void {
+pub inline fn errorFormat(
+    exc: ?*c.PyObject,
+    comptime format: []const u8,
+    args: anytype,
+) void {
     if (comptime args.len == 0) {
         c.PyErr_SetString(exc, @ptrCast(format));
-        return error.PyError;
+        return;
     }
     const printed = std.fmt.allocPrint(mem.allocator, format, args) catch {
         c.PyErr_SetString(c.PyExc_MemoryError, @ptrCast("out of memory"));
-        return error.PyError;
+        return;
     };
     defer mem.allocator.free(printed);
     const buf = mem.allocator.allocSentinel(u8, printed.len, 0) catch {
         c.PyErr_SetString(c.PyExc_MemoryError, @ptrCast("out of memory"));
-        return error.PyError;
+        return;
     };
     @memcpy(buf, printed);
     defer mem.allocator.free(buf);
     c.PyErr_SetString(exc, @ptrCast(buf));
-    return error.PyError;
 }
-
-/// Helper to return a value and set a Python error at the same time.
-pub inline fn typeErrorValue(comptime T: type, value: T, comptime msg: [:0]const u8, args: anytype) T {
-    typeError(msg, args) catch {};
-    return value;
-}
-
-// ============================================================================
-// Built-in exception base selector
-// ============================================================================
-
 /// Standard Python exception categories that can be used as a base for
 /// `createException`. Mirrors PyOZ's `ExcBase` enum.
 pub const ExceptionBase = enum {
@@ -188,8 +221,8 @@ pub const ExceptionBase = enum {
     unicode_warning,
     user_warning,
 
-    /// Resolve to the corresponding `*c.PyObject` exception class.
-    pub fn toPyObject(self: ExceptionBase) *c.PyObject {
+    /// Resolve to the corresponding `?*c.PyObject` exception class.
+    pub fn toPyObject(self: ExceptionBase) ?*c.PyObject {
         return switch (self) {
             .base_exception => c.PyExc_BaseException,
             .exception => c.PyExc_Exception,
@@ -251,12 +284,12 @@ pub const ExceptionBase = enum {
     }
 };
 
-// ============================================================================
-// Custom exception type
-// ============================================================================
-
 /// A custom Python exception class created via `createException`.
-/// Holds a strong reference to the exception type for the lifetime of the module.
+///
+/// `exc_type` is a borrowed reference owned by the module that the exception
+/// was registered against. The module keeps the exception class alive for the
+/// interpreter's lifetime, so callers may freely use `exc_type` without
+/// managing its reference count.
 pub const Exception = struct {
     exc_type: *Object,
 
@@ -283,9 +316,8 @@ pub const Exception = struct {
 /// The exception is automatically registered as an attribute of `mod` under
 /// `name`, so users can write `mymodule.MyError("msg")` from Python.
 ///
-/// On Python 3 the exception is created via `PyErr_NewException` with a fully
-/// qualified name like `"mymodule.MyError"`. On Python 2 we fall back to
-/// creating a class derived from the base via the C API.
+/// `PyErr_NewException` is available on both Python 2.7 and Python 3, so the
+/// same code path is used on both versions.
 pub fn createException(
     mod: *types.Module,
     name: [:0]const u8,
@@ -308,18 +340,10 @@ pub fn createException(
     @memcpy(qual_name[0..qual_name_noz.len], qual_name_noz);
 
     const base_obj = base.toPyObject();
-    const exc = blk: {
-        if (version.is_py3) {
-            // PyErr_NewException(name, base, dict) — base may be NULL for Exception.
-            // Pass NULL for dict; docstring (if any) is set below via __doc__.
-            const created = c.PyErr_NewException(qual_name.ptr, base_obj, null);
-            if (created) |e| break :blk e;
-        } else {
-            // Python 2: create a class derived from base using a small dict.
-            // PyErr_NewException is also available on Python 2.7, so use it.
-            const created = c.PyErr_NewException(qual_name.ptr, base_obj, null);
-            if (created) |e| break :blk e;
-        }
+    // `PyErr_NewException` is available on both Python 2.7 and Python 3, so
+    // no version branch is needed. Pass NULL for dict; the docstring (if any)
+    // is set below via the `__doc__` attribute.
+    const exc = c.PyErr_NewException(qual_name.ptr, base_obj, null) orelse {
         return error.PyError;
     };
 
@@ -333,12 +357,16 @@ pub fn createException(
     };
 
     // Register the new exception as a module attribute.
-    if (version.is_py3 and version.versionAtLeast(3, 10)) {
-        try mod.addObjectRef(name, @ptrCast(exc));
-        c.Py_DECREF(exc);
-    } else {
-        try mod.addObjectRef(name, @ptrCast(exc));
-    }
+    // `addObjectRef` does not steal the reference on any Python version:
+    //  - 3.10+ `PyModule_AddObjectRef` increfs internally.
+    //  - <3.10 `PyModule_AddObject` steals the `newref()` produced inside
+    //    `addObjectRef`, leaving the caller's original refcount unchanged.
+    // Either way we still own the new reference returned by
+    // `PyErr_NewException`, so we must decref it here to balance. The module
+    // keeps the exception class alive, so `Exception.exc_type` becomes a
+    // borrowed reference valid for the module's lifetime.
+    try mod.addObjectRef(name, @ptrCast(exc));
+    object.decrefRaw(exc);
 
     return .{ .exc_type = @ptrCast(exc) };
 }

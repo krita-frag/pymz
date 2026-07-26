@@ -1,129 +1,188 @@
 """Tests for the runtime backend-selection loader."""
 
 import json
-import os
 import sys
 from pathlib import Path
 
 import pytest
 
-import pymz_loader
+from pymz_tool import loader
 
 
-def _platform_tag() -> str:
+def _ext_suffix() -> str:
     import sysconfig
 
-    return sysconfig.get_platform().replace("-", "_").replace(".", "_")
+    return sysconfig.get_config_var("EXT_SUFFIX") or ".cpython-darwin.so"
 
 
-def test_loader_selects_exact_match():
-    config = {
-        "version": "1",
-        "module": "_jsonz",
-        "variants": [
-            {
-                "runtime": "cpython3",
-                "python_version": "99.99",
-                "abi_tag": "cp9999",
-                "platform_tag": "never_matches",
-                "filename": "wrong.so",
-            },
-            {
-                "runtime": "cpython3",
-                "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
-                "abi_tag": pymz_loader._abi_tag(),
-                "platform_tag": _platform_tag(),
-                "filename": "right.so",
-            },
-        ],
+def _abi3_suffix() -> str:
+    ext = _ext_suffix()
+    if "." in ext:
+        return ".abi3" + ext[ext.rfind("."):]
+    return ".abi3.so"
+
+
+def _write_manifest(package_dir: Path, module: str = "_jsonz", distribution: str = "jsonz", artifacts=None) -> None:
+    if artifacts is None:
+        artifacts = []
+    # Stamp each artifact with its owning module so the loader's
+    # `_select_extension_for_module` filter matches it.
+    stamped = []
+    for a in artifacts:
+        entry = dict(a)
+        entry.setdefault("module", module)
+        stamped.append(entry)
+    manifest = {
+        "schema_version": 1,
+        "modules": [module],
+        "module": module,
+        "version": "0.1.0",
+        "zig_target": "example",
+        "runtime": "cpython3",
+        "lib_dir": str(package_dir),
+        "distribution": distribution,
+        "artifacts": stamped,
     }
+    (package_dir / loader.MANIFEST_FILENAME).write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
 
-    selected = pymz_loader.best_matching_variant(config)
-    assert selected["filename"] == "right.so"
+
+def _select(package_dir: Path, module: str = "_jsonz"):
+    """Helper: load the manifest and pick the extension for *module*."""
+    manifest = loader._load_manifest(package_dir)
+    return loader._select_extension_for_module(module, manifest["artifacts"])
 
 
-def test_loader_falls_back_to_limited_abi():
-    config = {
-        "version": "1",
-        "module": "_jsonz",
-        "variants": [
-            {
-                "runtime": "cpython3-limited",
-                "python_version": "3.10",
-                "abi_tag": "abi3",
-                "platform_tag": _platform_tag(),
-                "filename": "limited.so",
-            },
-            {
-                "runtime": "cpython3",
-                "python_version": "3.8",
-                "abi_tag": "cp38",
-                "platform_tag": _platform_tag(),
-                "filename": "old.so",
-            },
+def test_loader_reads_manifest(tmp_path: Path):
+    package_dir = tmp_path / "jsonz"
+    package_dir.mkdir()
+    suffix = _ext_suffix()
+    _write_manifest(
+        package_dir,
+        artifacts=[{"filename": f"_jsonz{suffix}", "kind": "extension"}],
+    )
+
+    manifest = loader._load_manifest(package_dir)
+    assert manifest["module"] == "_jsonz"
+    assert manifest["schema_version"] == 1
+
+
+def test_loader_prefers_exact_abi_suffix(tmp_path: Path):
+    package_dir = tmp_path / "jsonz"
+    package_dir.mkdir()
+    exact = f"_jsonz{_ext_suffix()}"
+    abi3 = f"_jsonz{_abi3_suffix()}"
+    fallback = "_jsonz.so"
+    _write_manifest(
+        package_dir,
+        artifacts=[
+            {"filename": exact, "kind": "extension"},
+            {"filename": abi3, "kind": "extension"},
+            {"filename": fallback, "kind": "extension"},
         ],
-    }
+    )
 
-    selected = pymz_loader.best_matching_variant(config)
-    if sys.version_info[:2] == (3, 8):
-        assert selected["filename"] == "old.so"
-    else:
-        assert selected["filename"] == "limited.so"
+    selected = _select(package_dir)
+    assert selected == exact
 
 
-def test_loader_skips_headless_variants():
-    """Headless variants are ignored when picking a Python extension."""
-    config = {
-        "version": "1",
-        "module": "_jsonz",
-        "variants": [
-            {
-                "runtime": "headless",
-                "python_version": None,
-                "abi_tag": "none",
-                "platform_tag": "any",
-                "filename": "_jsonz-headless",
-            },
-            {
-                "runtime": "cpython3",
-                "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
-                "abi_tag": pymz_loader._abi_tag(),
-                "platform_tag": _platform_tag(),
-                "filename": "right.so",
-            },
+def test_loader_falls_back_to_abi3(tmp_path: Path):
+    package_dir = tmp_path / "jsonz"
+    package_dir.mkdir()
+    abi3 = f"_jsonz{_abi3_suffix()}"
+    fallback = "_jsonz.so"
+    _write_manifest(
+        package_dir,
+        artifacts=[
+            {"filename": abi3, "kind": "extension"},
+            {"filename": fallback, "kind": "extension"},
         ],
-    }
+    )
 
-    selected = pymz_loader.best_matching_variant(config)
-    assert selected["filename"] == "right.so"
+    selected = _select(package_dir)
+    assert selected == abi3
 
 
-def test_pymz_config_env_override(tmp_path: Path):
-    """PYMZ_CONFIG can point to a config outside the package directory."""
-    config = {
-        "version": "1",
-        "module": "_jsonz",
-        "variants": [
-            {
-                "runtime": "cpython3",
-                "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
-                "abi_tag": pymz_loader._abi_tag(),
-                "platform_tag": _platform_tag(),
-                "filename": "fake.so",
-            },
+def test_loader_falls_back_to_plain_so(tmp_path: Path):
+    package_dir = tmp_path / "jsonz"
+    package_dir.mkdir()
+    fallback = "_jsonz.so"
+    _write_manifest(
+        package_dir,
+        artifacts=[{"filename": fallback, "kind": "extension"}],
+    )
+
+    selected = _select(package_dir)
+    assert selected == fallback
+
+
+def test_loader_returns_none_when_no_artifact_matches(tmp_path: Path):
+    package_dir = tmp_path / "jsonz"
+    package_dir.mkdir()
+    _write_manifest(
+        package_dir,
+        artifacts=[{"filename": "_jsonz.cpython-310-darwin.so", "kind": "extension"}],
+    )
+
+    # An artifact for a different Python version must not be selected when the
+    # current interpreter cannot use it. (On CPython 3.10 this test is a no-op
+    # for the exact match; the assertion holds because the manifest lists only
+    # a 3.10 artifact and the current suffix differs on other versions.)
+    if _ext_suffix() == ".cpython-310-darwin.so":
+        pytest.skip("current interpreter is the artifact's target")
+    assert _select(package_dir) is None
+
+
+def test_loader_ignores_stub_artifacts(tmp_path: Path):
+    package_dir = tmp_path / "jsonz"
+    package_dir.mkdir()
+    suffix = _ext_suffix()
+    _write_manifest(
+        package_dir,
+        artifacts=[
+            {"filename": "_jsonz.pyi", "kind": "stub"},
+            {"filename": f"_jsonz{suffix}", "kind": "extension"},
         ],
-    }
-    config_path = tmp_path / "pymz-config.json"
-    config_path.write_text(json.dumps(config))
+    )
 
-    old = os.environ.get("PYMZ_CONFIG")
-    os.environ["PYMZ_CONFIG"] = str(config_path)
-    try:
-        with pytest.raises(FileNotFoundError):
-            pymz_loader.load_extension(module_name="jsonz._jsonz")
-    finally:
-        if old is None:
-            os.environ.pop("PYMZ_CONFIG", None)
-        else:
-            os.environ["PYMZ_CONFIG"] = old
-        sys.modules.pop("jsonz._jsonz", None)
+    selected = _select(package_dir)
+    assert selected == f"_jsonz{suffix}"
+
+
+def test_loader_rejects_wrong_schema_version(tmp_path: Path):
+    package_dir = tmp_path / "jsonz"
+    package_dir.mkdir()
+    (package_dir / loader.MANIFEST_FILENAME).write_text(
+        json.dumps({"schema_version": 99, "module": "_jsonz", "artifacts": []}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        loader._load_manifest(package_dir)
+
+
+def test_loader_raises_when_manifest_missing(tmp_path: Path):
+    package_dir = tmp_path / "jsonz"
+    package_dir.mkdir()
+
+    with pytest.raises(FileNotFoundError):
+        loader._load_manifest(package_dir)
+
+
+def test_resolve_module_name_uses_distribution(tmp_path: Path):
+    package_dir = tmp_path / "jsonz"
+    package_dir.mkdir()
+    _write_manifest(package_dir, module="_jsonz", distribution="jsonz")
+
+    manifest = loader._load_manifest(package_dir)
+    assert loader._resolve_module_name("_jsonz", manifest, package_dir) == "jsonz._jsonz"
+
+
+def test_resolve_module_name_falls_back_to_dir_name(tmp_path: Path):
+    package_dir = tmp_path / "jsonz"
+    package_dir.mkdir()
+    _write_manifest(package_dir, module="_jsonz", distribution=None)
+    manifest = loader._load_manifest(package_dir)
+    # distribution omitted -> fall back to the package directory name.
+    assert loader._resolve_module_name("_jsonz", manifest, package_dir) == "jsonz._jsonz"

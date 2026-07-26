@@ -1,16 +1,12 @@
 //! Core Python object protocol and basic types (Str, Bytes).
 
 const std = @import("std");
-const c = @import("c.zig").c;
-const version = @import("version.zig");
+const c = @import("python_c");
 const errors = @import("errors.zig");
 const mem = @import("../../mem.zig");
 const compat = @import("compat.zig");
+const version = @import("version.zig");
 const Error = errors.Error;
-
-// ============================================================================
-// Buffer description
-// ============================================================================
 
 /// Description of a Python buffer exported by a class `__buffer__` method.
 /// Returning this from `__buffer__` enables multi-dimensional and/or strided
@@ -36,29 +32,17 @@ pub const Buffer = struct {
     readonly: bool = false,
 };
 
-// ============================================================================
-// Core Object wrapper
-// ============================================================================
-
 pub const Object = extern struct {
     impl: c.PyObject,
 
     pub const IS_PYOBJECT = true;
 
     pub inline fn incref(self: *Object) void {
-        if (@hasDecl(c, "Py_IncRef")) {
-            c.Py_IncRef(@as(*c.PyObject, @ptrCast(self)));
-        } else {
-            c._Py_IncRef(@as(*c.PyObject, @ptrCast(self)));
-        }
+        c.Py_IncRef(@as(*c.PyObject, @ptrCast(self)));
     }
 
     pub inline fn decref(self: *Object) void {
-        if (@hasDecl(c, "Py_DecRef")) {
-            c.Py_DecRef(@as(*c.PyObject, @ptrCast(self)));
-        } else {
-            c._Py_DecRef(@as(*c.PyObject, @ptrCast(self)));
-        }
+        c.Py_DecRef(@as(*c.PyObject, @ptrCast(self)));
     }
 
     /// Return a new reference to this object. The caller must decref it.
@@ -67,72 +51,95 @@ pub const Object = extern struct {
         return self;
     }
 
+    /// Reference-counting helpers that can be shared by other PyObject-like
+    /// wrapper structs.  `extern struct` wrappers cannot use `usingnamespace`,
+    /// so each wrapper declares `incref`/`decref`/`newref` and forwards to these
+    /// static helpers.  The implementation is still unified in one place.
+    pub const RefCount = struct {
+        pub inline fn incref(comptime Self: type, self: *Self) void {
+            @as(*Object, @ptrCast(self)).incref();
+        }
+        pub inline fn decref(comptime Self: type, self: *Self) void {
+            @as(*Object, @ptrCast(self)).decref();
+        }
+        pub inline fn newref(comptime Self: type, self: *Self) *Self {
+            return @as(*Self, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+        }
+    };
+
     pub inline fn refcnt(self: *const Object) isize {
         return c.Py_REFCNT(@as(*c.PyObject, @ptrCast(@constCast(self))));
     }
 
     pub inline fn isNone(self: *const Object) bool {
-        return @intFromPtr(self) == @intFromPtr(c.Py_None());
+        return @intFromPtr(self) == @intFromPtr(c.pymz_Py_None());
     }
 
     pub inline fn isTrue(self: *const Object) bool {
-        return @intFromPtr(self) == @intFromPtr(c.Py_True());
+        return @intFromPtr(self) == @intFromPtr(c.pymz_Py_True());
     }
 
     pub inline fn isBool(self: *Object) bool {
-        return compat.cApiBool(c.PyBool_Check(@as(*c.PyObject, @ptrCast(self))));
+        return compat.cApiBool(c.pymz_PyBool_Check(@as(*c.PyObject, @ptrCast(self))));
     }
 
     pub inline fn asBool(self: *Object) bool {
         return c.PyObject_IsTrue(@as(*c.PyObject, @ptrCast(self))) != 0;
     }
 
+    /// True when the object is a Python int (Py3 `int` / Py2 `int` or `long`).
     pub inline fn isInt(self: *Object) bool {
+        const py: *c.PyObject = @as(*c.PyObject, @ptrCast(self));
         if (version.is_py3) {
-            return compat.cApiBool(c.PyLong_Check(@as(*c.PyObject, @ptrCast(self))));
+            return compat.cApiBool(c.PyLong_Check(py));
         }
-        return compat.cApiBool(c.PyInt_Check(@as(*c.PyObject, @ptrCast(self)))) or
-            compat.cApiBool(c.PyLong_Check(@as(*c.PyObject, @ptrCast(self))));
+        // Python 2 distinguishes int and long; both are integers.
+        return compat.cApiBool(c.pymz_PyInt_Check(py)) or
+            compat.cApiBool(c.PyLong_Check(py));
     }
 
+    /// Convert a Python int object to a Zig integer type with range checking.
+    /// On overflow a Python `OverflowError` is set and `error.PyError` returned.
     pub inline fn asInt(self: *Object, comptime T: type) Error!T {
+        const py: *c.PyObject = @as(*c.PyObject, @ptrCast(self));
         switch (@typeInfo(T)) {
             .int => |info| {
                 if (info.signedness == .signed) {
-                    const value = try compat.intAsSigned(@as(*c.PyObject, @ptrCast(self)));
-                    const min = std.math.minInt(T);
-                    const max = std.math.maxInt(T);
-                    if (value < min or value > max) {
-                        errors.overflowError("int too large to convert to {s}", .{@typeName(T)}) catch {};
+                    const v = try compat.intAsSigned(py);
+                    if (v < std.math.minInt(T) or v > std.math.maxInt(T)) {
+                        errors.overflowError("int too large to convert to {s}", .{@typeName(T)});
                         return error.PyError;
                     }
-                    return @intCast(value);
+                    return @intCast(v);
+                } else {
+                    const v = try compat.intAsUnsigned(py);
+                    if (v > std.math.maxInt(T)) {
+                        errors.overflowError("int too large to convert to {s}", .{@typeName(T)});
+                        return error.PyError;
+                    }
+                    return @intCast(v);
                 }
-
-                const value = try compat.intAsUnsigned(@as(*c.PyObject, @ptrCast(self)));
-                const max = std.math.maxInt(T);
-                if (value > max) {
-                    errors.overflowError("int too large to convert to {s}", .{@typeName(T)}) catch {};
-                    return error.PyError;
-                }
-                return @intCast(value);
             },
-            else => @compileError("asInt expects an integer type"),
+            else => @compileError("Object.asInt expects an integer type"),
         }
     }
 
+    /// True when the object is a Python `float`.
     pub inline fn isFloat(self: *Object) bool {
         return compat.cApiBool(c.PyFloat_Check(@as(*c.PyObject, @ptrCast(self))));
     }
 
+    /// Convert a Python float object to a Zig float type. `PyFloat_AsDouble`
+    /// returns `-1.0` on failure and sets an exception, which is surfaced as
+    /// `error.PyError`.
     pub inline fn asFloat(self: *Object, comptime T: type) Error!T {
         switch (@typeInfo(T)) {
             .float => {
-                const value = c.PyFloat_AsDouble(@as(*c.PyObject, @ptrCast(self)));
-                if (value == -1.0 and errors.errorOccurred() != null) return error.PyError;
-                return @floatCast(value);
+                const v = c.PyFloat_AsDouble(@as(*c.PyObject, @ptrCast(self)));
+                if (v == -1.0 and errors.errorOccurred() != null) return error.PyError;
+                return @floatCast(v);
             },
-            else => @compileError("asFloat expects a float type"),
+            else => @compileError("Object.asFloat expects a float type"),
         }
     }
 
@@ -153,7 +160,7 @@ pub const Object = extern struct {
     }
 
     pub inline fn sequenceLength(self: *Object) Error!usize {
-        const len = c.PyObject_Length(@as(*c.PyObject, @ptrCast(self)));
+        const len = c.PyObject_Size(@as(*c.PyObject, @ptrCast(self)));
         if (len < 0) return error.PyError;
         return @intCast(len);
     }
@@ -233,30 +240,10 @@ pub const Object = extern struct {
         }
     }
 
-    pub inline fn str(self: *Object) Error!*Str {
-        if (c.PyObject_Str(@as(*c.PyObject, @ptrCast(self)))) |r| {
-            return @as(*Str, @ptrCast(r));
-        }
-        return error.PyError;
-    }
-
-    pub inline fn repr(self: *Object) Error!*Str {
-        if (c.PyObject_Repr(@as(*c.PyObject, @ptrCast(self)))) |r| {
-            return @as(*Str, @ptrCast(r));
-        }
-        return error.PyError;
-    }
-
     /// Borrow the UTF-8 bytes backing a string object. The slice is valid only
     /// while `self` is alive.
     pub inline fn asString(self: *Object) Error![:0]const u8 {
         return Str.asString(@ptrCast(self));
-    }
-
-    pub inline fn length(self: *Object) Error!usize {
-        const n = c.PyObject_Length(@as(*c.PyObject, @ptrCast(self)));
-        if (n < 0) return error.PyError;
-        return @intCast(n);
     }
 
     pub inline fn isInstance(self: *Object, typ: *Type) Error!bool {
@@ -268,20 +255,25 @@ pub const Object = extern struct {
     }
 };
 
-// ============================================================================
-// Singletons
-// ============================================================================
+/// Raw reference counting helpers that keep version-specific macros in C.
+pub inline fn increfRaw(op: *c.PyObject) void {
+    c.pymz_Py_INCREF(op);
+}
+
+pub inline fn decrefRaw(op: *c.PyObject) void {
+    c.pymz_Py_DECREF(op);
+}
 
 pub inline fn None() *Object {
-    return @ptrCast(c.Py_None());
+    return @ptrCast(c.pymz_Py_None());
 }
 
 pub inline fn True() *Object {
-    return @ptrCast(c.Py_True());
+    return @ptrCast(c.pymz_Py_True());
 }
 
 pub inline fn False() *Object {
-    return @ptrCast(c.Py_False());
+    return @ptrCast(c.pymz_Py_False());
 }
 
 pub inline fn returnNone() *Object {
@@ -292,46 +284,21 @@ pub inline fn returnBool(value: bool) *Object {
     return (if (value) True() else False()).newref();
 }
 
-pub inline fn returnOptional(value: anytype) *Object {
-    const T = @TypeOf(value);
-    if (isObjectPtrOptional(T)) {
-        if (value) |o| return o.newref();
-        return returnNone();
-    }
-    @compileError("returnOptional expects ?*Object");
-}
-
-// ============================================================================
-// Type wrapper
-// ============================================================================
-
 pub const Type = extern struct {
     impl: c.PyObject,
 
     pub const IS_PYOBJECT = true;
 
     pub inline fn incref(self: *Type) void {
-        @as(*Object, @ptrCast(self)).incref();
+        Object.RefCount.incref(Type, self);
     }
     pub inline fn decref(self: *Type) void {
-        @as(*Object, @ptrCast(self)).decref();
+        Object.RefCount.decref(Type, self);
     }
     pub inline fn newref(self: *Type) *Type {
-        return @as(*Type, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
-    }
-
-    pub inline fn checkObject(self: *Type, obj: *Object) Error!bool {
-        const rc = c.PyObject_TypeCheck(
-            @as(*c.PyObject, @ptrCast(obj)),
-            @as(*c.PyObject, @ptrCast(self)),
-        );
-        return compat.cApiTriState(rc);
+        return Object.RefCount.newref(Type, self);
     }
 };
-
-// ============================================================================
-// String / Unicode wrapper
-// ============================================================================
 
 pub const Str = extern struct {
     impl: c.PyObject,
@@ -339,13 +306,13 @@ pub const Str = extern struct {
     pub const IS_PYOBJECT = true;
 
     pub inline fn incref(self: *Str) void {
-        @as(*Object, @ptrCast(self)).incref();
+        Object.RefCount.incref(Str, self);
     }
     pub inline fn decref(self: *Str) void {
-        @as(*Object, @ptrCast(self)).decref();
+        Object.RefCount.decref(Str, self);
     }
     pub inline fn newref(self: *Str) *Str {
-        return @as(*Str, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+        return Object.RefCount.newref(Str, self);
     }
 
     pub inline fn check(obj: *Object) bool {
@@ -374,47 +341,13 @@ pub const Str = extern struct {
     }
 };
 
-// ============================================================================
-// Unicode text wrapper (always Unicode: `unicode` on Python 2, `str` on Python 3)
-// ============================================================================
-
-pub const Unicode = extern struct {
-    impl: c.PyObject,
-
-    pub const IS_PYOBJECT = true;
-
-    pub inline fn incref(self: *Unicode) void {
-        @as(*Object, @ptrCast(self)).incref();
-    }
-    pub inline fn decref(self: *Unicode) void {
-        @as(*Object, @ptrCast(self)).decref();
-    }
-    pub inline fn newref(self: *Unicode) *Unicode {
-        return @as(*Unicode, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
-    }
-
-    pub inline fn check(obj: *Object) bool {
-        return compat.cApiBool(c.PyUnicode_Check(@as(*c.PyObject, @ptrCast(obj))));
-    }
-
-    pub inline fn fromSlice(s: []const u8) Error!*Unicode {
-        if (compat.unicodeFromSlice(s)) |r| return @as(*Unicode, @ptrCast(r));
-        return error.PyError;
-    }
-
-    /// Return the UTF-8 bytes backing the unicode object. The returned slice
-    /// borrows from `self`.
-    pub inline fn asString(self: *Unicode) Error![:0]const u8 {
-        if (compat.strAsString(@as(*c.PyObject, @ptrCast(self)))) |s| {
-            return s;
-        }
-        return error.PyError;
-    }
-};
-
-// ============================================================================
-// Bytes wrapper (for binary data)
-// ============================================================================
+/// Create a new Unicode text object (`unicode` on Python 2, `str` on Python 3).
+/// On Python 3 this is identical to `Str.fromSlice`; on Python 2 it always
+/// produces a `unicode` object regardless of the `str` type.
+pub fn unicodeFromSlice(s: []const u8) Error!*Object {
+    if (compat.unicodeFromSlice(s)) |r| return @as(*Object, @ptrCast(r));
+    return error.PyError;
+}
 
 pub const Bytes = extern struct {
     impl: c.PyObject,
@@ -422,13 +355,13 @@ pub const Bytes = extern struct {
     pub const IS_PYOBJECT = true;
 
     pub inline fn incref(self: *Bytes) void {
-        @as(*Object, @ptrCast(self)).incref();
+        Object.RefCount.incref(Bytes, self);
     }
     pub inline fn decref(self: *Bytes) void {
-        @as(*Object, @ptrCast(self)).decref();
+        Object.RefCount.decref(Bytes, self);
     }
     pub inline fn newref(self: *Bytes) *Bytes {
-        return @as(*Bytes, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+        return Object.RefCount.newref(Bytes, self);
     }
 
     pub inline fn check(obj: *Object) bool {
@@ -449,23 +382,19 @@ pub const Bytes = extern struct {
     }
 };
 
-// ============================================================================
-// Bytearray wrapper (mutable binary data)
-// ============================================================================
-
 pub const ByteArray = extern struct {
     impl: c.PyObject,
 
     pub const IS_PYOBJECT = true;
 
     pub inline fn incref(self: *ByteArray) void {
-        @as(*Object, @ptrCast(self)).incref();
+        Object.RefCount.incref(ByteArray, self);
     }
     pub inline fn decref(self: *ByteArray) void {
-        @as(*Object, @ptrCast(self)).decref();
+        Object.RefCount.decref(ByteArray, self);
     }
     pub inline fn newref(self: *ByteArray) *ByteArray {
-        return @as(*ByteArray, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+        return Object.RefCount.newref(ByteArray, self);
     }
 
     pub inline fn check(obj: *Object) bool {
@@ -486,6 +415,3 @@ pub const ByteArray = extern struct {
         return ptr[0..@as(usize, @intCast(size))];
     }
 };
-
-const traits = @import("traits.zig");
-const isObjectPtrOptional = traits.isObjectPtrOptional;

@@ -1,18 +1,14 @@
 //! Numeric and collection type wrappers.
 
 const std = @import("std");
-const c = @import("c.zig").c;
+const c = @import("python_c");
 const version = @import("version.zig");
 const errors = @import("errors.zig");
 const object = @import("object.zig");
 const compat = @import("compat.zig");
 const Object = object.Object;
 const Error = errors.Error;
-const class_mod = @import("class.zig");
-
-// ============================================================================
-// Integer wrapper
-// ============================================================================
+const class_mod = @import("class/class_builder.zig");
 
 pub const Int = extern struct {
     impl: c.PyObject,
@@ -20,13 +16,13 @@ pub const Int = extern struct {
     pub const IS_PYOBJECT = true;
 
     pub inline fn incref(self: *Int) void {
-        @as(*Object, @ptrCast(self)).incref();
+        Object.RefCount.incref(@This(), self);
     }
     pub inline fn decref(self: *Int) void {
-        @as(*Object, @ptrCast(self)).decref();
+        Object.RefCount.decref(@This(), self);
     }
     pub inline fn newref(self: *Int) *Int {
-        return @as(*Int, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+        return Object.RefCount.newref(@This(), self);
     }
 
     pub inline fn check(obj: *Object) bool {
@@ -68,7 +64,7 @@ pub const Int = extern struct {
                     const min = std.math.minInt(T);
                     const max = std.math.maxInt(T);
                     if (v < min or v > max) {
-                        errors.overflowError("int too large to convert to {s}", .{@typeName(T)}) catch {};
+                        errors.overflowError("int too large to convert to {s}", .{@typeName(T)});
                         return error.PyError;
                     }
                     return @intCast(v);
@@ -76,7 +72,7 @@ pub const Int = extern struct {
                     const v = try compat.intAsUnsigned(@as(*c.PyObject, @ptrCast(self)));
                     const max = std.math.maxInt(T);
                     if (v > max) {
-                        errors.overflowError("int too large to convert to {s}", .{@typeName(T)}) catch {};
+                        errors.overflowError("int too large to convert to {s}", .{@typeName(T)});
                         return error.PyError;
                     }
                     return @intCast(v);
@@ -87,23 +83,19 @@ pub const Int = extern struct {
     }
 };
 
-// ============================================================================
-// Float wrapper
-// ============================================================================
-
 pub const Float = extern struct {
     impl: c.PyObject,
 
     pub const IS_PYOBJECT = true;
 
     pub inline fn incref(self: *Float) void {
-        @as(*Object, @ptrCast(self)).incref();
+        Object.RefCount.incref(@This(), self);
     }
     pub inline fn decref(self: *Float) void {
-        @as(*Object, @ptrCast(self)).decref();
+        Object.RefCount.decref(@This(), self);
     }
     pub inline fn newref(self: *Float) *Float {
-        return @as(*Float, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+        return Object.RefCount.newref(@This(), self);
     }
 
     pub inline fn check(obj: *Object) bool {
@@ -131,23 +123,19 @@ pub const Float = extern struct {
     }
 };
 
-// ============================================================================
-// Bool wrapper
-// ============================================================================
-
 pub const Bool = extern struct {
     impl: c.PyObject,
 
     pub const IS_PYOBJECT = true;
 
     pub inline fn incref(self: *Bool) void {
-        @as(*Object, @ptrCast(self)).incref();
+        Object.RefCount.incref(@This(), self);
     }
     pub inline fn decref(self: *Bool) void {
-        @as(*Object, @ptrCast(self)).decref();
+        Object.RefCount.decref(@This(), self);
     }
     pub inline fn newref(self: *Bool) *Bool {
-        return @as(*Bool, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+        return Object.RefCount.newref(@This(), self);
     }
 
     pub inline fn check(obj: *Object) bool {
@@ -163,23 +151,19 @@ pub const Bool = extern struct {
     }
 };
 
-// ============================================================================
-// Tuple wrapper
-// ============================================================================
-
 pub const Tuple = extern struct {
     impl: c.PyObject,
 
     pub const IS_PYOBJECT = true;
 
     pub inline fn incref(self: *Tuple) void {
-        @as(*Object, @ptrCast(self)).incref();
+        Object.RefCount.incref(@This(), self);
     }
     pub inline fn decref(self: *Tuple) void {
-        @as(*Object, @ptrCast(self)).decref();
+        Object.RefCount.decref(@This(), self);
     }
     pub inline fn newref(self: *Tuple) *Tuple {
-        return @as(*Tuple, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+        return Object.RefCount.newref(@This(), self);
     }
 
     pub inline fn check(obj: *Object) bool {
@@ -189,18 +173,6 @@ pub const Tuple = extern struct {
     pub inline fn new(size: usize) Error!*Tuple {
         if (c.PyTuple_New(@as(c.Py_ssize_t, @intCast(size)))) |r| return @as(*Tuple, @ptrCast(r));
         return error.PyError;
-    }
-
-    pub inline fn pack(items: anytype) Error!*Tuple {
-        const fields = @typeInfo(@TypeOf(items)).@"struct".fields;
-        const tuple = try new(fields.len);
-        errdefer tuple.decref();
-        inline for (fields, 0..) |f, i| {
-            const item = @field(items, f.name);
-            const obj: *Object = @ptrCast(item);
-            tuple.setUnsafe(i, obj);
-        }
-        return tuple;
     }
 
     pub inline fn setUnsafe(self: *Tuple, i: usize, obj: *Object) void {
@@ -219,23 +191,19 @@ pub const Tuple = extern struct {
     }
 };
 
-// ============================================================================
-// List wrapper
-// ============================================================================
-
 pub const List = extern struct {
     impl: c.PyObject,
 
     pub const IS_PYOBJECT = true;
 
     pub inline fn incref(self: *List) void {
-        @as(*Object, @ptrCast(self)).incref();
+        Object.RefCount.incref(@This(), self);
     }
     pub inline fn decref(self: *List) void {
-        @as(*Object, @ptrCast(self)).decref();
+        Object.RefCount.decref(@This(), self);
     }
     pub inline fn newref(self: *List) *List {
-        return @as(*List, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+        return Object.RefCount.newref(@This(), self);
     }
 
     pub inline fn check(obj: *Object) bool {
@@ -269,27 +237,23 @@ pub const List = extern struct {
     }
 };
 
-// ============================================================================
-// Dict wrapper
-// ============================================================================
-
 pub const Dict = extern struct {
     impl: c.PyObject,
 
     pub const IS_PYOBJECT = true;
 
-    pub inline fn check(obj: *Object) bool {
-        return compat.cApiBool(c.PyDict_Check(@as(*c.PyObject, @ptrCast(obj))));
-    }
-
     pub inline fn incref(self: *Dict) void {
-        @as(*Object, @ptrCast(self)).incref();
+        Object.RefCount.incref(@This(), self);
     }
     pub inline fn decref(self: *Dict) void {
-        @as(*Object, @ptrCast(self)).decref();
+        Object.RefCount.decref(@This(), self);
     }
     pub inline fn newref(self: *Dict) *Dict {
-        return @as(*Dict, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+        return Object.RefCount.newref(@This(), self);
+    }
+
+    pub inline fn check(obj: *Object) bool {
+        return compat.cApiBool(c.PyDict_Check(@as(*c.PyObject, @ptrCast(obj))));
     }
 
     pub inline fn new() Error!*Dict {
@@ -306,23 +270,19 @@ pub const Dict = extern struct {
     }
 };
 
-// ============================================================================
-// Set wrapper
-// ============================================================================
-
 pub const Set = extern struct {
     impl: c.PyObject,
 
     pub const IS_PYOBJECT = true;
 
     pub inline fn incref(self: *Set) void {
-        @as(*Object, @ptrCast(self)).incref();
+        Object.RefCount.incref(@This(), self);
     }
     pub inline fn decref(self: *Set) void {
-        @as(*Object, @ptrCast(self)).decref();
+        Object.RefCount.decref(@This(), self);
     }
     pub inline fn newref(self: *Set) *Set {
-        return @as(*Set, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+        return Object.RefCount.newref(@This(), self);
     }
 
     pub inline fn check(obj: *Object) bool {
@@ -347,22 +307,8 @@ pub const Set = extern struct {
         if (c.PySet_Add(@as(*c.PyObject, @ptrCast(self)), @ptrCast(obj)) < 0) return error.PyError;
     }
 
-    pub inline fn contains(self: *Set, obj: *Object) Error!bool {
-        const rc = c.PySet_Contains(@as(*c.PyObject, @ptrCast(self)), @ptrCast(obj));
-        return compat.cApiTriState(rc);
-    }
-
     pub inline fn length(self: *Set) usize {
         return @intCast(c.PySet_Size(@as(*c.PyObject, @ptrCast(self))));
-    }
-
-    pub inline fn pop(self: *Set) Error!?*Object {
-        const item = c.PySet_Pop(@as(*c.PyObject, @ptrCast(self)));
-        if (item == null) {
-            if (errors.errorOccurred() != null) return error.PyError;
-            return null;
-        }
-        return @as(*Object, @ptrCast(item));
     }
 };
 
@@ -372,13 +318,13 @@ pub const FrozenSet = extern struct {
     pub const IS_PYOBJECT = true;
 
     pub inline fn incref(self: *FrozenSet) void {
-        @as(*Object, @ptrCast(self)).incref();
+        Object.RefCount.incref(@This(), self);
     }
     pub inline fn decref(self: *FrozenSet) void {
-        @as(*Object, @ptrCast(self)).decref();
+        Object.RefCount.decref(@This(), self);
     }
     pub inline fn newref(self: *FrozenSet) *FrozenSet {
-        return @as(*FrozenSet, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+        return Object.RefCount.newref(@This(), self);
     }
 
     pub inline fn check(obj: *Object) bool {
@@ -399,24 +345,19 @@ pub const FrozenSet = extern struct {
         return @intCast(c.PySet_Size(@as(*c.PyObject, @ptrCast(self))));
     }
 };
-
-// ============================================================================
-// Slice wrapper
-// ============================================================================
-
 pub const Slice = extern struct {
     impl: c.PyObject,
 
     pub const IS_PYOBJECT = true;
 
     pub inline fn incref(self: *Slice) void {
-        @as(*Object, @ptrCast(self)).incref();
+        Object.RefCount.incref(@This(), self);
     }
     pub inline fn decref(self: *Slice) void {
-        @as(*Object, @ptrCast(self)).decref();
+        Object.RefCount.decref(@This(), self);
     }
     pub inline fn newref(self: *Slice) *Slice {
-        return @as(*Slice, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+        return Object.RefCount.newref(@This(), self);
     }
 
     pub inline fn check(obj: *Object) bool {
@@ -461,24 +402,19 @@ pub const Slice = extern struct {
         };
     }
 };
-
-// ============================================================================
-// Module wrapper
-// ============================================================================
-
 pub const Module = extern struct {
     impl: c.PyObject,
 
     pub const IS_PYOBJECT = true;
 
     pub inline fn incref(self: *Module) void {
-        @as(*Object, @ptrCast(self)).incref();
+        Object.RefCount.incref(@This(), self);
     }
     pub inline fn decref(self: *Module) void {
-        @as(*Object, @ptrCast(self)).decref();
+        Object.RefCount.decref(@This(), self);
     }
     pub inline fn newref(self: *Module) *Module {
-        return @as(*Module, @ptrCast(@as(*Object, @ptrCast(self)).newref()));
+        return Object.RefCount.newref(@This(), self);
     }
 
     pub inline fn addObjectRef(self: *Module, name: [:0]const u8, value: *Object) Error!void {
@@ -504,15 +440,9 @@ pub const Module = extern struct {
     /// Calls the class's `ready()` to invoke `PyType_Ready`, then adds the
     /// resulting `*PyTypeObject` to the module dict under `name`.
     pub inline fn addClass(self: *Module, name: [:0]const u8, class_def: class_mod.ClassDef) Error!void {
-        _ = class_def.name;
-        _ = class_def.doc;
-        const type_obj = class_def.ready_fn();
+        const type_obj = class_def.ready_fn() orelse return error.PyError;
         const py_type: *Object = @ptrCast(@alignCast(type_obj));
         try self.addObjectRef(name, py_type);
-    }
-
-    pub inline fn getDict(self: *Module) *Dict {
-        return @ptrCast(c.PyModule_GetDict(@as(*c.PyObject, @ptrCast(self))));
     }
 
     /// Borrowed reference to the module name as a UTF-8 string.

@@ -2,7 +2,8 @@
 
 const common = @import("common.zig");
 const module_mod = @import("../module.zig");
-const stubs = @import("../stubs.zig");
+const limiter = @import("../limiter.zig");
+const signature = @import("../signature.zig");
 
 pub const ExportKind = common.ExportKind;
 pub const FnMode = common.FnMode;
@@ -13,6 +14,7 @@ fn FunctionDescriptor(
     comptime mode_value: FnMode,
     comptime param_names_value: ?[]const u8,
     comptime doc_value: ?[]const u8,
+    comptime limited_value: ?bool,
 ) type {
     return struct {
         pub const export_kind: ExportKind = .function;
@@ -22,6 +24,8 @@ fn FunctionDescriptor(
         pub const mode = mode_value;
         pub const param_names = param_names_value;
         pub const doc = doc_value;
+        pub const limited = limited_value;
+        pub const is_active = limiter.isActiveForPlatform(limited_value);
 
         pub fn methodDefWithName(comptime export_name: [:0]const u8) common.MethodDef {
             return methodDefWithNameAndParamNames(export_name, null);
@@ -39,7 +43,7 @@ fn FunctionDescriptor(
                 .varargs => module_mod.pyfn_varargs(func),
             };
             const ml_doc = switch (mode) {
-                .kwargs => stubs.buildMlDocWithOptions(
+                .kwargs => signature.buildMlDocWithOptions(
                     export_name,
                     @TypeOf(func),
                     .module_func,
@@ -47,7 +51,7 @@ fn FunctionDescriptor(
                     doc,
                     effective_param_names,
                 ),
-                .positional => stubs.buildMlDocWithOptions(
+                .positional => signature.buildMlDocWithOptions(
                     export_name,
                     @TypeOf(func),
                     .module_func,
@@ -55,7 +59,7 @@ fn FunctionDescriptor(
                     doc,
                     effective_param_names,
                 ),
-                .mixed => stubs.buildMlDocWithOptions(
+                .mixed => signature.buildMlDocWithOptions(
                     export_name,
                     @TypeOf(func),
                     .module_func,
@@ -63,7 +67,7 @@ fn FunctionDescriptor(
                     doc,
                     effective_param_names,
                 ),
-                .varargs => stubs.buildMlDocWithOptions(
+                .varargs => signature.buildMlDocWithOptions(
                     export_name,
                     @TypeOf(func),
                     .module_func,
@@ -85,30 +89,6 @@ fn FunctionDescriptor(
                 .ml_doc = ml_doc,
             };
         }
-
-        pub fn stubWithName(comptime export_name: [:0]const u8) stubs.Stub {
-            return stubWithNameAndParamNames(export_name, null);
-        }
-
-        pub fn stubWithNameAndParamNames(
-            comptime export_name: [:0]const u8,
-            comptime names: ?[]const u8,
-        ) stubs.Stub {
-            const effective_param_names = names orelse param_names;
-            const kwargs_mode: stubs.KwargsMode = switch (mode) {
-                .kwargs => .args_struct,
-                .positional => .positional,
-                .mixed => .mixed,
-                .varargs => .varargs,
-            };
-            return stubs.functionStubAuto(
-                export_name,
-                @TypeOf(func),
-                kwargs_mode,
-                doc,
-                effective_param_names,
-            );
-        }
     };
 }
 
@@ -117,7 +97,7 @@ pub fn function(
     comptime desc: anytype,
 ) type {
     const opts = common.extractFunctionOptions(desc);
-    return FunctionDescriptor(func, .mixed, opts.signature, opts.doc);
+    return FunctionDescriptor(func, .mixed, common.resolveParamNames(opts), opts.doc, opts.limited);
 }
 
 pub fn positionalFunction(
@@ -125,7 +105,7 @@ pub fn positionalFunction(
     comptime desc: anytype,
 ) type {
     const opts = common.extractFunctionOptions(desc);
-    return FunctionDescriptor(func, .positional, opts.signature, opts.doc);
+    return FunctionDescriptor(func, .positional, common.resolveParamNames(opts), opts.doc, opts.limited);
 }
 
 pub fn kwFunction(
@@ -133,7 +113,7 @@ pub fn kwFunction(
     comptime desc: anytype,
 ) type {
     const opts = common.extractFunctionOptions(desc);
-    return FunctionDescriptor(func, .kwargs, opts.signature, opts.doc);
+    return FunctionDescriptor(func, .kwargs, common.resolveParamNames(opts), opts.doc, opts.limited);
 }
 
 pub fn varargsFunction(
@@ -141,5 +121,5 @@ pub fn varargsFunction(
     comptime desc: anytype,
 ) type {
     const opts = common.extractFunctionOptions(desc);
-    return FunctionDescriptor(func, .varargs, opts.signature, opts.doc);
+    return FunctionDescriptor(func, .varargs, common.resolveParamNames(opts), opts.doc, opts.limited);
 }
