@@ -70,3 +70,12 @@ static inline PyObject *pymz_PyType_FromMetaclass(PyTypeObject *metaclass, PyObj
     return PyType_FromMetaclass(metaclass, module, spec, bases);
 }
 #endif
+
+/* PyObject_GC_UnTrack is a macro (_PyObject_GC_UNTRACK) in CPython < 3.11
+ * and a function in 3.11+. Zig's translate-c cannot see macros, so we wrap
+ * it in a static inline function that is always visible to translate-c.
+ * On all Python versions the underlying operation removes the object from
+ * the GC tracking list without freeing it. */
+static inline void pymz_PyObject_GC_UnTrack(PyObject *o) {
+    PyObject_GC_UnTrack(o);
+}

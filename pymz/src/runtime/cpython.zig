@@ -1,4 +1,4 @@
-//! CPython runtime backend.
+//! CPython 运行时后端。
 
 const std = @import("std");
 const errors = @import("cpython/errors.zig");
@@ -103,26 +103,55 @@ pub fn threadStateGet() ?*ThreadState {
     return null;
 }
 
-/// Token representing that the current thread holds the GIL.
+/// 表示当前线程持有 GIL 的令牌。
 ///
-/// **Status: runtime convention, not a compile-time-enforced guarantee.** The
-/// pymz runtime APIs (`Str.fromSlice`, `convert.toPy`, `Int.from`, etc.) do
-/// *not* currently require a `Python` token in their signatures, so the type
-/// system does not prevent calls from a thread that has released the GIL.
-/// Callers are responsible for ensuring the GIL is held before invoking any
-/// pymz API that touches the interpreter; use `GIL.acquire()` /
-/// `GIL.ensure()` to obtain the token and `GIL.held()` / `GIL.assertHeld()`
-/// for runtime checks.
+/// **状态：运行时约定，非编译期强制保证。** pymz 运行时 API（`Str.fromSlice`、`convert.toPy`、`Int.from` 等）
+/// 当前*不*要求签名中包含 `Python` 令牌，因此类型系统无法阻止已释放 GIL 的线程调用。
+/// 调用方有责任在调用任何涉及解释器的 pymz API 之前确保持有 GIL；
+/// 使用 `GIL.acquire()` / `GIL.ensure()` 获取令牌，使用 `GIL.held()` /
+/// `GIL.assertHeld()` / `GIL.assertHeldByCurrentThread()` 做运行时检查。
 ///
-/// The token exists so that future API hardening can thread it through
-/// signatures incrementally without changing the token's shape. Code that
-/// already takes a `Python` parameter documents its GIL requirement at the
-/// type level; code that does not is still correct as long as the caller
-/// holds the GIL.
+/// 该令牌的存在是为了让未来的 API 加固可以逐步将其注入签名，而无需改变令牌的形状。
+/// 已经接受 `Python` 参数的代码在类型层面记录了其 GIL 要求；
+/// 未接受的代码只要调用方持有 GIL 仍然正确。
+///
+/// ## 推荐用法
+///
+/// **场景 1：在 Zig 后台线程中调用 pymz API**
+///
+/// 后台线程默认不持有 GIL，必须显式 acquire：
+///
+///   var guard = py.GIL.acquire();
+///   defer guard.deinit();
+///   // 此处可安全调用 pymz API
+///   const s = try py.string("hello");
+///
+/// **场景 2：在函数入口断言 GIL 已被持有（防御性检查）**
+///
+/// 对于不接收 `Python` 令牌但理论上应被 GIL 持有线程调用的函数：
+///
+///   fn my_helper() void {
+///       py.GIL.assertHeldByCurrentThread();  // Debug 构建触发，Release 构建零开销
+///       // ...
+///   }
+///
+/// **场景 3：把 `Python` 令牌注入函数签名（编译期文档）**
+///
+/// 让函数签名本身记录 GIL 要求，并在 Debug 构建中双重检查：
+///
+///   fn my_strict_api(py: py.Python) void {
+///       py.GIL.assertHeld();  // 令牌存在即证明 GIL 已持有，断言是双保险
+///       // ...
+///   }
+///
+/// 调用方需先 acquire 令牌再传入：
+///
+///   var guard = py.GIL.acquire();
+///   defer guard.deinit();
+///   my_strict_api(guard.python);
 pub const Python = struct {
-    // The opaque GIL state saved by `PyGILState_Ensure`. The token cannot be
-    // constructed by user code, so possession of a `Python` value proves (to
-    // code that chooses to require it) that the thread currently holds the GIL.
+    // `PyGILState_Ensure` 保存的不透明 GIL 状态。用户代码无法构造此令牌，
+    // 因此持有 `Python` 值即可证明（对那些选择要求它的代码而言）当前线程持有 GIL。
     _gil_state: GILState,
 };
 
@@ -139,10 +168,26 @@ pub const GIL = struct {
         return threadStateGet() != null;
     }
 
-    /// Assert at runtime that the GIL is held. Useful inside functions that
-    /// accept a `Python` token but want an extra sanity check in debug builds.
+    /// 运行时断言 GIL 已被持有。适用于接受 `Python` 令牌的函数，在调试构建中增加额外检查。
+    ///
+    /// 令牌存在本身已证明 GIL 被持有，本断言是双保险：捕获令牌被错误复用
+    /// （例如跨线程传递后原线程已释放 GIL）的边界情况。
     pub fn assertHeld(_: Python) void {
         std.debug.assert(held());
+    }
+
+    /// 运行时断言当前线程持有 GIL。适用于不接收 `Python` 令牌的函数，
+    /// 在 Debug/ReleaseSafe 构建中触发断言，ReleaseFast 构建中仍有
+    /// `PyGILState_Check` 调用开销但断言指令被移除。
+    ///
+    /// 与 `assertHeld(_: Python)` 的区别：本函数无需令牌参数，用于函数入口
+    /// 的防御性检查；`assertHeld(_: Python)` 用于已持有令牌的双重保险。
+    ///
+    /// 实现委托给 `errors.assertGILHeldByCurrentThread`，这是 GIL 断言的
+    /// 单一真相源。子模块（object.zig、convert.zig）的关键 API 入口也调用
+    /// 同一函数，避免重复 `@hasDecl(c, "PyGILState_Check")` 检查和循环依赖。
+    pub fn assertHeldByCurrentThread() void {
+        errors.assertGILHeldByCurrentThread();
     }
 
     pub const Guard = struct {
@@ -160,9 +205,8 @@ pub const GIL = struct {
         }
     };
 
-    /// Acquire the GIL and return both a scoped guard and a `Python` token.
-    /// The guard releases the GIL when it goes out of scope; the token can be
-    /// passed to APIs that require proof of GIL ownership.
+    /// 获取 GIL 并返回作用域守卫和 `Python` 令牌。
+    /// 守卫在离开作用域时释放 GIL；令牌可传递给需要 GIL 持有证明的 API。
     pub fn acquire() Guard {
         return .{ .python = ensure() };
     }

@@ -1,25 +1,21 @@
-//! Default backend entrypoint for `@import("pymz_backend")`.
+//! `@import("pymz_backend")` 的默认后端入口。
 //!
-//! Projects can override this module with `-Dpymz-backend-source` to supply a
-//! different backend implementation without changing the core build logic.
+//! 项目可通过 `-Dpymz-backend-source` 覆盖此模块，以提供不同的后端实现，
+//! 无需修改核心构建逻辑。
 //!
-//! Backend dispatch uses the canonical `RuntimeId` table from `contract.zig`
-//! (the single source of truth for runtime identity) rather than an ad-hoc
-//! string-prefix check, so only runtimes registered in that table can be
-//! selected. Unknown runtimes produce a compile error pointing at the
-//! offending value.
+//! 后端分发使用 `contract.zig` 中的规范 `RuntimeId` 表（运行时标识的唯一
+//! 真相源），而非临时字符串前缀检查，因此只有在该表中注册的运行时才能被
+//! 选中。未知的运行时会在编译期报错，指向违规值。
 //!
-//! The built-in CPython backend adapter is merged directly into this file:
-//! it re-exports the CPython runtime declarations from `runtime/cpython.zig`
-//! and exposes `backendSpec()`/`Backend()` so consumers can reach the
-//! CPython object model through the `pymz_backend` module indirection.
+//! 内置的 CPython 后端适配器直接合并到此文件中：它从 `runtime/cpython.zig`
+//! 重新导出 CPython 运行时声明，并暴露 `backendSpec()`/`Backend()`，使
+//! 消费者可通过 `pymz_backend` 模块间接访问 CPython 对象模型。
 
 const std = @import("std");
-// The contract types come through the `pymz_contract` anonymous module whose
-// root is `contract.zig`. Using this indirection (instead of a direct
-// `@import("contract.zig")`) keeps `contract.zig` owned by a single module, so
-// the `pymz` module (whose root `pymz.zig` also references `contract.zig`) and
-// the `pymz_backend` module can coexist in one compilation.
+// 契约类型通过 `pymz_contract` 匿名模块传入（其根文件为 `contract.zig`）。
+// 使用此间接引用（而非直接 `@import("contract.zig")`）保持 `contract.zig`
+// 被单个模块拥有，使 `pymz` 模块（其根文件 `pymz.zig` 也引用 `contract.zig`）
+// 和 `pymz_backend` 模块可在同一编译中共存。
 const contract = @import("pymz_contract");
 const options = @import("pymz_options");
 const version = @import("runtime/cpython/version.zig");
@@ -33,6 +29,9 @@ pub const validateBackend = contract.validateBackend;
 pub const RuntimeId = contract.RuntimeId;
 pub const RuntimeInfo = contract.RuntimeInfo;
 pub const runtimeInfo = contract.runtimeInfo;
+pub const builtin_runtime_ids = contract.builtin_runtime_ids;
+pub const allRuntimeInfos = contract.allRuntimeInfos;
+pub const runtimeInfoFromString = contract.runtimeInfoFromString;
 
 pub const c = cpython.c;
 pub const Error = cpython.Error;
@@ -94,8 +93,8 @@ pub const is_limited_api = version.is_limited_api;
 const runtime_id = contract.RuntimeId.fromString(options.runtime) catch
     @compileError("unknown pymz runtime: " ++ options.runtime);
 
-// The CPython backend handles every cpython* runtime. The `custom` runtime
-// requires a separate backend module supplied via `-Dpymz-backend-source`.
+// CPython 后端处理所有 cpython* 运行时。`custom` 运行时需要通过
+// `-Dpymz-backend-source` 提供单独的后端模块。
 comptime {
     switch (runtime_id) {
         .cpython2, .cpython3, .cpython3_limited => {},
@@ -117,10 +116,9 @@ pub fn backendSpec() BackendSpec {
 }
 
 pub fn Backend() type {
-    // Validate the backend against its declared capabilities at compile time
-    // before handing the type to callers. Performing the check here (rather
-    // than in a separate shim) lets the declarative layer import this module
-    // directly and keeps a single source of truth for backend readiness.
+    // 在将后端类型交给调用方之前，在编译期验证其是否满足声明的能力。
+    // 在此处（而非单独的 shim 中）执行检查，让声明层可直接导入本模块，
+    // 并为后端就绪状态保持单一真相源。
     const backend_type = @This();
     contract.validateBackend(backend_type, backendSpec().capabilities);
     return backend_type;

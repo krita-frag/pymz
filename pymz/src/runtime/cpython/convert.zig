@@ -1,13 +1,10 @@
-//! Conversion helpers between Zig values and Python objects.
+//! Zig 值与 Python 对象之间的转换辅助函数。
 //!
-//! This module owns the conversion surface only: `toPy` / `fromPy`, the
-//! `PymzConvert` trait, value cleanup (`releaseValue`,
-//! `releaseStructFields`), and the list helpers. The argument-extraction and
-//! return-value pipeline that wraps a user function (`extractPositionalArg`,
-//! `handleReturn`, `releaseArgsTuple`, ...) lives in `marshal.zig`, which
-//! imports this module for the conversion primitives. Keeping the two
-//! responsibilities separate lets each stay focused; the dependency is
-//! one-way (`marshal` -> `convert`).
+//! 本模块只负责转换层：`toPy` / `fromPy`、`PymzConvert` trait、值清理
+//!（`releaseValue`、`releaseStructFields`）以及列表辅助函数。参数提取和
+//! 返回值管道（`extractPositionalArg`、`handleReturn`、`releaseArgsTuple`...）
+//! 在 `marshal.zig` 中，后者导入本模块使用转换原语。将两个职责分开使各模块
+//! 保持专注；依赖关系是单向的（`marshal` -> `convert`）。
 
 const std = @import("std");
 const c = @import("python_c");
@@ -21,27 +18,53 @@ const mem = @import("../../mem.zig");
 const Object = object.Object;
 const Error = errors.Error;
 
-/// Formal conversion trait. Types can declare:
+/// 正式转换 trait。类型可声明：
 ///
 ///   pub const PymzConvert = struct {
 ///       pub fn intoPy(value: T) Error!*Object { ... }
 ///       pub fn fromPy(obj: *Object) Error!T { ... }
 ///   };
 ///
-/// and `toPy`/`fromPy` will use it automatically.
-pub fn hasPymzConvert(comptime T: type) bool {
-    return @hasDecl(T, "PymzConvert") and
-        @hasDecl(T.PymzConvert, "intoPy") and
-        @hasDecl(T.PymzConvert, "fromPy");
+/// 或者使用简化的直接声明约定：
+///
+///   pub fn toPy(self: T) Error!*Object { ... }
+///   pub fn fromPy(obj: *Object) Error!T { ... }
+///
+/// 然后 `toPy`/`fromPy` 会自动使用它。两种约定可共存，`PymzConvert` 优先。
+/// Check if type T has a user-defined conversion, either via `PymzConvert`
+/// or via direct `toPy`/`fromPy` declarations. Only container types can
+/// have declarations; non-container types always return false.
+pub fn hasUserToPy(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct", .@"union", .@"enum" => @hasDecl(T, "PymzConvert") or @hasDecl(T, "toPy"),
+        else => false,
+    };
 }
 
-pub inline fn pymzIntoPy(value: anytype) Error!*Object {
+pub fn hasUserFromPy(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct", .@"union", .@"enum" => @hasDecl(T, "PymzConvert") or @hasDecl(T, "fromPy"),
+        else => false,
+    };
+}
+
+/// Dispatch to the user's toPy conversion. PymzConvert.intoPy takes precedence
+/// over direct `pub fn toPy`.
+pub inline fn userToPy(value: anytype) Error!*Object {
     const T = @TypeOf(value);
-    return T.PymzConvert.intoPy(value);
+    if (comptime @hasDecl(T, "PymzConvert")) {
+        return T.PymzConvert.intoPy(value);
+    }
+    return @field(T, "toPy")(value);
 }
 
-pub inline fn pymzFromPy(comptime T: type, obj: *Object) Error!T {
-    return T.PymzConvert.fromPy(obj);
+/// Dispatch to the user's fromPy conversion. PymzConvert.fromPy takes precedence
+/// over direct `pub fn fromPy`.
+pub inline fn userFromPy(comptime T: type, obj: *Object) Error!T {
+    if (comptime @hasDecl(T, "PymzConvert")) {
+        return T.PymzConvert.fromPy(obj);
+    }
+    return @field(T, "fromPy")(obj);
 }
 
 pub fn isOwnedBytes(comptime T: type) bool {
@@ -51,14 +74,14 @@ pub fn isOwnedBytes(comptime T: type) bool {
     };
 }
 
-/// Convert a comptime-known byte slice into a sentinel-terminated `[:0]const u8`
-/// without copying. The sentinel byte is appended at compile time.
+/// 将编译期已知的字节切片转换为哨兵终止的 `[:0]const u8`，无需拷贝。
+/// 哨兵字节在编译期追加。
 pub fn toSentinelStr(comptime s: []const u8) [:0]const u8 {
     return (s ++ "\x00")[0..s.len :0];
 }
 
-/// Release temporary resources owned by a converted value.
-/// `value` must be a pointer to the argument / field.
+/// 释放转换后的值所拥有的临时资源。
+/// `value` 必须是指向参数/字段的指针。
 pub fn releaseValue(value: anytype) void {
     const T = @TypeOf(value);
     if (@typeInfo(T) != .pointer) @compileError("releaseValue expects a pointer");
@@ -82,9 +105,8 @@ pub fn releaseValue(value: anytype) void {
                 inner.* = .empty;
                 return;
             }
-            // StringHashMap is intentionally not handled here: toPyStruct /
-            // fromPyStruct do not convert StringHashMap, so a converted value
-            // can never be a StringHashMap and there is nothing to release.
+            // StringHashMap 在此处故意不处理：toPyStruct / fromPyStruct 不转换
+            // StringHashMap，因此转换后的值不可能是 StringHashMap，无需释放。
         }
         return;
     }
@@ -94,19 +116,27 @@ pub fn releaseValue(value: anytype) void {
         value.* = .empty;
         return;
     }
-    // StringHashMap is intentionally not handled here for the same reason as
-    // above: no conversion path produces one, so this branch is unreachable.
+    // StringHashMap 在此处故意不处理，理由同上：没有转换路径会产生它，
+    // 因此此分支不可达。
 }
 
-/// Convert a Zig value into a Python object.
+/// 将 Zig 值转换为 Python 对象。
 ///
-/// Always returns a NEW reference. Callers own the returned reference and must
-/// eventually decref it (or transfer ownership to a container that steals it,
-/// such as `Tuple.setUnsafe` or `List.set`). Pointer inputs (e.g. `*Object`)
-/// are treated as borrowed for the duration of the call: `toPy` increfs them
-/// before returning so the caller's original reference is unaffected.
+/// 始终返回一个新引用（NEW reference）。调用方拥有返回的引用，必须最终
+/// decref（或转移所有权给会窃取引用的容器，如 `Tuple.setUnsafe` 或
+/// `List.set`）。指针输入（如 `*Object`）在调用期间视为借用：`toPy` 在
+/// 返回前会 incref，因此调用方的原始引用不受影响。
 pub fn toPy(value: anytype) Error!*Object {
+    // 防御性 GIL 检查：所有 toPy 路径最终都会调用 CPython C API 构造对象，
+    // 调用方必须已持有 GIL。Debug/ReleaseSafe 构建触发断言；
+    // ReleaseFast 中 PyGILState_Check 调用开销不可避免但断言指令被移除。
+    errors.assertGILHeldByCurrentThread();
     const T = @TypeOf(value);
+    // User-defined conversion (PymzConvert trait or direct toPy) takes
+    // precedence over built-in conversions for all container types.
+    if (comptime hasUserToPy(T)) {
+        return userToPy(value);
+    }
     switch (@typeInfo(T)) {
         .int => return @ptrCast(try types.Int.from(value)),
         .comptime_int => return @ptrCast(try types.Int.from(value)),
@@ -143,22 +173,25 @@ pub fn toPy(value: anytype) Error!*Object {
             return object.returnNone();
         },
         .error_union => {
-            if (value) |inner| return try toPy(inner);
-            return error.PyError;
+            if (value) |inner| {
+                return try toPy(inner);
+            } else |err| {
+                errors.mapError(err);
+                return error.PyError;
+            }
         },
         else => @compileError(std.fmt.comptimePrint("toPy: cannot convert {s}", .{@typeName(T)})),
     }
 }
 
-/// Pointer arm of `toPy`. Handles borrowed PyObject pointers, byte slices,
-/// sentinel-terminated strings, and general slices.
+/// `toPy` 的指针分支。处理借用的 PyObject 指针、字节切片、哨兵终止字符串
+/// 和通用切片。
 fn toPyPointer(comptime T: type, value: T) Error!*Object {
     const ptr_info = @typeInfo(T).pointer;
-    // Borrowed PyObject pointers are incref'd so callers always receive
-    // a new reference. This makes `toPy` compositional: callers can
-    // pass the result to APIs that steal (PyList_SetItem,
-    // PyTuple_SetItem) or that borrow (PyDict_SetItemString) without
-    // worrying about underflow.
+    // 借用的 PyObject 指针会被 incref，以便调用方始终收到新引用。
+    // 这使得 `toPy` 可组合：调用方可以将结果传递给窃取引用的 API
+    //（PyList_SetItem、PyTuple_SetItem）或借用引用的 API
+    //（PyDict_SetItemString），而无需担心引用计数下溢。
     if (traits.isObjectPtr(T)) {
         value.incref();
         return @ptrCast(value);
@@ -184,7 +217,7 @@ fn toPyPointer(comptime T: type, value: T) Error!*Object {
             return @ptrCast(try object.Str.fromSlice(std.mem.sliceTo(value, 0)));
         }
     }
-    // Generic slice (non-byte) → Python list.
+    // 通用切片（非字节）→ Python 列表。
     if (ptr_info.size == .slice) {
         const list = try types.List.new(value.len);
         errdefer list.decref();
@@ -197,31 +230,33 @@ fn toPyPointer(comptime T: type, value: T) Error!*Object {
     @compileError(std.fmt.comptimePrint("toPy: cannot convert pointer type {s}", .{@typeName(T)}));
 }
 
-/// Struct arm of `toPy`. Handles `PymzConvert` trait, tuple structs,
-/// `ArrayList` wrappers, and plain structs (converted to dicts).
+/// `toPy` 的结构体分支。处理元组结构体、
+/// `ArrayList` 包装器和普通结构体（转换为字典）。
+/// 注意：`PymzConvert` trait 和直接 `toPy` 声明的检查在 `toPy` 入口处完成，
+/// 此处不再重复检查。
 fn toPyStruct(comptime T: type, value: T) Error!*Object {
     const struct_info = @typeInfo(T).@"struct";
-    if (comptime hasPymzConvert(T)) {
-        return try pymzIntoPy(value);
-    }
 
     if (struct_info.is_tuple) {
         const tuple = try types.Tuple.new(struct_info.fields.len);
         errdefer tuple.decref();
         inline for (struct_info.fields, 0..) |field, i| {
             const item = try toPy(@field(value, field.name));
-            tuple.setUnsafe(i, item);
+            try tuple.setUnsafe(i, item);
         }
         return @ptrCast(tuple);
     }
 
     if (traits.isArrayList(T)) {
-        var mutable = value;
-        defer mutable.deinit(mem.allocator);
-        const list = try types.List.new(mutable.items.len);
+        // 不消费 ArrayList：toPy 仅读取 items 切片构造 Python 列表，
+        // 不调用 deinit——调用方仍拥有原 ArrayList 并负责其生命周期。
+        // 先前实现在此 deinit 一个 by-value 拷贝，但 ArrayList 是 fat-pointer
+        // struct（items 切片共享 backing buffer），拷贝的 deinit 会释放调用方
+        // 仍持有的 buffer，造成 use-after-free。
+        const list = try types.List.new(value.items.len);
         errdefer list.decref();
-        for (0..mutable.items.len) |i| {
-            const item = try toPy(mutable.items[i]);
+        for (0..value.items.len) |i| {
+            const item = try toPy(value.items[i]);
             try list.set(i, item);
         }
         return @ptrCast(list);
@@ -238,36 +273,35 @@ fn toPyStruct(comptime T: type, value: T) Error!*Object {
     return @ptrCast(dict);
 }
 
-/// Union arm of `toPy`. Tagged unions are converted to a `(tag_name, payload)`
-/// tuple; untagged unions are a compile error.
+/// `toPy` 的联合体分支。带标签的联合体转换为 `(tag_name, payload)` 元组；
+/// 无标签的联合体是编译错误。
 fn toPyUnion(comptime T: type, value: T) Error!*Object {
     const union_info = @typeInfo(T).@"union";
     if (union_info.tag_type == null) {
         @compileError(std.fmt.comptimePrint("toPy: cannot convert untagged union {s}", .{@typeName(T)}));
     }
     const Tag = union_info.tag_type.?;
-    const tag_name = @tagName(@as(Tag, value));
-    const name_obj = try object.Str.fromSlice(tag_name);
-    defer name_obj.decref();
 
-    inline for (union_info.fields) |field| {
-        if (comptime std.mem.eql(u8, field.name, tag_name)) {
-            const payload = @field(value, field.name);
+    // switch + inline else 在编译期展开所有联合体分支，消除 unreachable。
+    switch (value) {
+        inline else => |payload| {
+            const tag_name = @tagName(@as(Tag, value));
+            const name_obj = try object.Str.fromSlice(tag_name);
+            defer name_obj.decref();
             const payload_obj = try toPy(payload);
             defer payload_obj.decref();
             const tuple = try types.Tuple.new(2);
             errdefer tuple.decref();
             name_obj.incref();
-            tuple.setUnsafe(0, @ptrCast(name_obj));
+            try tuple.setUnsafe(0, @ptrCast(name_obj));
             payload_obj.incref();
-            tuple.setUnsafe(1, payload_obj);
+            try tuple.setUnsafe(1, payload_obj);
             return @ptrCast(tuple);
-        }
+        },
     }
-    unreachable;
 }
 
-/// Return the Python type name of `obj` (e.g. "str", "int"). Borrows from `obj`.
+/// 返回 `obj` 的 Python 类型名（如 "str"、"int"）。从 `obj` 借用。
 pub fn pyTypeName(obj: *Object) [:0]const u8 {
     const typ = c.PyObject_Type(@as(*c.PyObject, @ptrCast(obj))) orelse return "unknown";
     defer object.decrefRaw(typ);
@@ -283,6 +317,14 @@ pub fn pyTypeName(obj: *Object) [:0]const u8 {
 }
 
 pub fn fromPy(comptime T: type, obj: *Object) Error!T {
+    // 防御性 GIL 检查：fromPy 通过 CPython C API 读取对象状态（PyLong_AsLong、
+    // PyUnicode_AsUTF8 等），调用方必须已持有 GIL。
+    errors.assertGILHeldByCurrentThread();
+    // User-defined conversion (PymzConvert trait or direct fromPy) takes
+    // precedence over built-in conversions for all container types.
+    if (comptime hasUserFromPy(T)) {
+        return userFromPy(T, obj);
+    }
     switch (@typeInfo(T)) {
         .int => {
             if (!types.Int.check(obj)) {
@@ -295,16 +337,15 @@ pub fn fromPy(comptime T: type, obj: *Object) Error!T {
             if (types.Float.check(obj)) {
                 return types.Float.as(@ptrCast(obj), T);
             }
-            if (types.Int.check(obj)) {
-                const v = types.Int.as(@ptrCast(obj), i64) catch return error.PyError;
-                return @floatFromInt(v);
-            }
-            errors.typeError("expected float, got {s}", .{pyTypeName(obj)});
-            return error.PyError;
+            // Use PyFloat_AsDouble for any object supporting __float__ (including int),
+            // avoiding overflow when converting large Python ints to i64 first.
+            const val = c.PyFloat_AsDouble(@as(*c.PyObject, @ptrCast(obj)));
+            if (val == -1.0 and c.PyErr_Occurred() != null) return error.PyError;
+            return @as(T, @floatCast(val));
         },
         .bool => {
             if (types.Bool.check(obj)) return @as(*types.Bool, @ptrCast(obj)).as();
-            return c.PyObject_IsTrue(@as(*c.PyObject, @ptrCast(obj))) != 0;
+            return compat.cApiTriState(c.PyObject_IsTrue(@as(*c.PyObject, @ptrCast(obj))));
         },
         .@"enum" => |enum_info| {
             if (!types.Int.check(obj)) {
@@ -331,8 +372,8 @@ pub fn fromPy(comptime T: type, obj: *Object) Error!T {
     }
 }
 
-/// Pointer arm of `fromPy`. Handles PyObject pointers, byte slices (const and
-/// mutable), and sentinel-terminated strings.
+/// `fromPy` 的指针分支。处理 PyObject 指针、字节切片（const 和 mutable）
+/// 以及哨兵终止字符串。
 fn fromPyPointer(comptime T: type, obj: *Object) Error!T {
     const ptr_info = @typeInfo(T).pointer;
     if (traits.isObjectPtr(T)) {
@@ -376,20 +417,19 @@ fn fromPyPointer(comptime T: type, obj: *Object) Error!T {
             return error.PyError;
         };
         return mem.allocator.dupe(u8, src) catch {
-            c.PyErr_SetString(c.PyExc_MemoryError, @ptrCast("out of memory"));
+            c.PyErr_SetString(c.PyExc_MemoryError, "out of memory");
             return error.PyError;
         };
     }
     @compileError(std.fmt.comptimePrint("fromPy: cannot convert to pointer type {s}", .{@typeName(T)}));
 }
 
-/// Struct arm of `fromPy`. Handles `PymzConvert` trait, tuple structs,
-/// `ArrayList` wrappers, and plain structs (converted from dicts).
+/// `fromPy` 的结构体分支。处理元组结构体、
+/// `ArrayList` 包装器和普通结构体（从字典转换）。
+/// 注意：`PymzConvert` trait 和直接 `fromPy` 声明的检查在 `fromPy` 入口处完成，
+/// 此处不再重复检查。
 fn fromPyStruct(comptime T: type, obj: *Object) Error!T {
     const struct_info = @typeInfo(T).@"struct";
-    if (comptime hasPymzConvert(T)) {
-        return try pymzFromPy(T, obj);
-    }
 
     if (struct_info.is_tuple) {
         if (!types.Tuple.check(obj)) {
@@ -405,9 +445,13 @@ fn fromPyStruct(comptime T: type, obj: *Object) Error!T {
         inline for (struct_info.fields, 0..) |field, i| {
             const py_item = tuple.get(i) orelse {
                 errors.typeError("tuple index {d} out of range", .{i});
+                releaseStructFields(&result, i);
                 return error.PyError;
             };
-            @field(result, field.name) = try fromPy(field.type, py_item);
+            @field(result, field.name) = fromPy(field.type, py_item) catch {
+                releaseStructFields(&result, i);
+                return error.PyError;
+            };
         }
         return result;
     }
@@ -440,14 +484,15 @@ fn fromPyStruct(comptime T: type, obj: *Object) Error!T {
             @field(result, field.name) = null;
         } else {
             errors.typeError("missing required key '{s}' for {s}", .{ field.name, @typeName(T) });
+            releaseStructFields(&result, i);
             return error.PyError;
         }
     }
     return result;
 }
 
-/// Union arm of `fromPy`. Expects a `(tag_name, payload)` tuple and dispatches
-/// to the matching union field.
+/// `fromPy` 的联合体分支。期望 `(tag_name, payload)` 元组，并分发到
+/// 匹配的联合体字段。
 fn fromPyUnion(comptime T: type, obj: *Object) Error!T {
     const union_info = @typeInfo(T).@"union";
     if (union_info.tag_type == null) {
@@ -496,15 +541,27 @@ pub fn releaseStructFields(value: anytype, count: usize) void {
 pub fn listToArrayList(comptime T: type, list: *types.List) Error!std.ArrayList(T) {
     const len = list.length();
     var result = std.ArrayList(T).initCapacity(mem.allocator, len) catch {
-        c.PyErr_SetString(c.PyExc_MemoryError, @ptrCast("out of memory"));
+        c.PyErr_SetString(c.PyExc_MemoryError, "out of memory");
         return error.PyError;
     };
-    errdefer result.deinit(mem.allocator);
+    errdefer {
+        // 释放已添加的元素，释放释放缓冲区。
+        // 如果不这样做，从 mem.allocator.dupe 创建的 []u8 元素会泄漏。
+        for (result.items) |*item| {
+            releaseValue(item);
+        }
+        result.deinit(mem.allocator);
+    }
     for (0..len) |i| {
         const item = list.get(i) orelse break;
-        const converted = try fromPy(T, item);
+        const converted = fromPy(T, item) catch |err| {
+            return err;
+        };
         result.append(mem.allocator, converted) catch {
-            c.PyErr_SetString(c.PyExc_MemoryError, @ptrCast("out of memory"));
+            // append 失败；释放未添加的转换值。
+            // 这样可以确保在失败时不会泄漏任何内存。
+            releaseValue(&converted);
+            c.PyErr_SetString(c.PyExc_MemoryError, "out of memory");
             return error.PyError;
         };
     }

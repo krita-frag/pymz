@@ -1,0 +1,17 @@
+.{
+    .name = .showcase,
+    .version = "0.1.0",
+    .fingerprint = 0x14b88cd0fca1d4eb,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .@"pymz-tool" = .{ .path = "../../pymz-tool" },
+        .pymz = .{ .path = "../../pymz" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "python",
+        "src",
+        "tests",
+    },
+}

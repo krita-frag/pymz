@@ -1,7 +1,7 @@
-//! Python value surface.
+//! Python 值表层。
 //!
-//! This namespace holds the concrete Python object wrappers and value
-//! constructors. Higher-level declaration helpers live in `py/decl.zig`.
+//! 本命名空间存放具体的 Python 对象包装器和值构造器。
+//! 更高层的声明辅助函数位于 `py/decl.zig`。
 
 const interface = @import("pymz_backend");
 
@@ -29,6 +29,17 @@ pub const FrozenSet = backend.FrozenSet;
 pub const Slice = backend.Slice;
 pub const Buffer = backend.Buffer;
 
+/// GIL 令牌类型，表示当前线程持有 CPython 全局解释器锁。
+///
+/// 见 `py.zig` 顶部的 "GIL 约定" 章节和 `GIL` 命名空间的文档了解使用模式。
+pub const Python = backend.Python;
+
+/// GIL 管理命名空间：`acquire`/`ensure`/`release`/`held`/`assertHeld`/
+/// `assertHeldByCurrentThread`。
+///
+/// 详见 `py.zig` 顶部的 "GIL 约定" 章节和 `Python` 令牌类型的推荐用法文档。
+pub const GIL = backend.GIL;
+
 pub fn none() *Object {
     return @ptrCast(backend.none());
 }
@@ -49,7 +60,7 @@ pub fn string(value: []const u8) Result(*Object) {
     return @ptrCast(try backend.Str.fromSlice(value));
 }
 
-/// Create a Unicode text object (`unicode` on Python 2, `str` on Python 3).
+/// 创建一个 Unicode 文本对象（Python 2 上为 `unicode`，Python 3 上为 `str`）。
 pub fn unicode(value: []const u8) Result(*Object) {
     return @ptrCast(try backend.unicodeFromSlice(value));
 }

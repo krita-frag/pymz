@@ -380,6 +380,12 @@ pymz-tool matrix --module _foo --distribution foo --version 0.1.0 \
 （`-Dpymz-python-includes` 等）；Windows 目标还应提供 `-Dpymz-windows-import-lib`。
 缺失时构建失败或明确报告无法链接，而不会生成错误标签的 wheel。
 
+> **跨 OS 限制**：`shouldSkipCrossTarget` 默认跳过非宿主 OS 的目标（例如在 macOS
+> 上无法直接交叉编译 Linux wheel），因为 `python-config` 只报告宿主工具链。完整的
+> 跨 OS 矩阵需要为每个目标 OS 提供对应的 Python 工具链（通过 `-Dpymz-python-*`
+> 选项或 `PYMZ_PYTHON_*` 环境变量注入），而非开箱即用。同 OS 内的跨架构（如
+> x86_64-linux -> aarch64-linux）在提供目标 Python 工具链后可正常工作。
+
 ## 公共 API
 
 | 名称 | 说明 |
@@ -395,7 +401,11 @@ pymz-tool matrix --module _foo --distribution foo --version 0.1.0 \
 | `pymz.py.value.Result(T)` | 返回类型，等价于 `!T`。 |
 | `pymz.py.value.Object` | 不透明的 `PyObject *`。 |
 | `pymz.py.value.none/boolean/integer/floating/string` | 构造 Python 对象。 |
-| `pymz.py.value.list(n)` / `pymz.py.value.dict()` | 构造容器。 |
+| `pymz.py.value.unicode(s)` | 构造 Unicode 文本对象（Python 2 为 `unicode`，Python 3 为 `str`）。 |
+| `pymz.py.value.bytes(s)` / `pymz.py.value.bytearray(s)` | 构造 `bytes` / `bytearray` 对象。 |
+| `pymz.py.value.list(n)` / `pymz.py.value.dict()` / `pymz.py.value.tuple(n)` | 构造容器。 |
+| `pymz.py.value.set(items)` / `pymz.py.value.frozenset(items)` | 构造集合对象（需后端 `set_model` 能力）。 |
+| `pymz.py.value.slice(start, stop, step)` | 构造切片对象（需后端 `slice_model` 能力）。 |
 
 ### 运行时后端
 
@@ -426,9 +436,8 @@ pymz-tool matrix --module _foo --distribution foo --version 0.1.0 \
   `m_slots` + `Py_mod_exec`），默认用于所有 Python 3 构建。3.12 的 `PyType_FromMetaclass`
   C 包装与版本门控已就位。PEP 703 free-threading 感知通过 `Py_IncRef` /
   `Py_DecRef` 稳定 ABI 函数原生兼容。
-- **m_size multi-phase 兼容性**：当前 CPython 3.12+ 运行时抛出 `m_size may not be
-  negative for multi-phase initialization`。`m_size = -1` 与 `m_slots` multi-phase 初始化
-  冲突，需要在后端 codegen 中修复模块定义。
+- **m_size multi-phase 兼容性**：已修复。`m_size` 从 `-1` 改为 `0`，兼容 CPython 3.12+
+  的 multi-phase 初始化约束。
 - **多后端落地验证**：`-Dpymz-backend-source` 注入槽位与 `Capabilities`/`validateBackend`
   契约层已就绪，但仅 CPython 一个实现。接入 PyPy/GraalPy 需平行实现一套 runtime。
 - **跨 OS 一键构建**：`shouldSkipCrossTarget` 默认跳过非宿主 OS 的目标，因为

@@ -1,43 +1,56 @@
-"""Internal compatibility helpers shared across pymz-tool modules.
+"""pymz-tool 模块间共享的内部兼容性辅助工具。
 
-Centralises two concerns that every build entry point (CLI, PEP 517 backend,
-setuptools integration, matrix builder) needs:
+集中处理每个构建入口点（CLI、PEP 517 后端、setuptools 集成、矩阵构建器）都需要的问题：
 
-- Canonical default values for ``runtime`` and ``zig-target``. Keeping these as
-  named constants guarantees every entry point agrees on the same default
-  instead of each site picking its own magic string.
-- A single ``typing.Any`` import shim so Python 2.7 (which lacks the standard
-  ``typing`` module) does not require a per-module ``try/except ImportError``
-  boilerplate.
+- ``runtime`` 和 ``zig-target`` 的规范默认值。保持为命名常量可保证每个入口点使用相同的默认值，
+  而非各自选择自己的魔法字符串。
+- 一个 ``typing.Any`` 导入垫片，使 Python 2.7（缺少标准 ``typing`` 模块）
+  无需在每个模块中写 ``try/except ImportError`` 样板代码。
 """
 from __future__ import absolute_import
 
 import sys
 
-#: Build-time runtime used when the user does not pick one. ``"auto"`` resolves
-#: to ``cpython2`` or ``cpython3`` from the detected interpreter's major
-#: version, so a single config works across Python 2 and 3 hosts.
+#: 用户未选择时使用的构建时运行环境。``"auto"`` 根据检测到的解释器主版本号
+#: 解析为 ``cpython2`` 或 ``cpython3``，因此单个配置可同时用于 Python 2 和 3 主机。
 DEFAULT_RUNTIME = "auto"
 
-#: ``zig build`` step name used when neither config nor CLI overrides it. This
-#: matches the step name projects declare in their ``build.zig`` by convention.
-DEFAULT_ZIG_TARGET = "example"
+#: 当配置和 CLI 均未覆盖时使用的 ``zig build`` 步骤名称。
+#: 项目应在其 ``build.zig`` 中声明同名步骤。``"pymz"`` 是项目无关的
+#: 通用默认值，不暗示任何特定示例。
+DEFAULT_ZIG_TARGET = "pymz"
 
-#: Default Python source directory.
+#: 默认的 Python 源目录。
 DEFAULT_PACKAGE_DIR = "python"
 
-#: Concrete runtime recorded in a manifest when the build-time runtime was
-#: ``"auto"``. Manifests are read at import time where ``"auto"`` is ambiguous,
-#: so the build resolves it to a concrete name before writing.
+#: 当构建时运行环境为 ``"auto"`` 时，记录在清单中的具体运行环境名称。
+#: 清单在导入时被读取，那时 ``"auto"`` 具有歧义性，
+#: 因此构建在写入前将其解析为具体名称。
 MANIFEST_RUNTIME_AUTO_FALLBACK = "cpython3"
+
+
+#: 清单 schema 版本的单一真相源。``manifest.py`` 写入，``loader.py`` 读取。
+SCHEMA_VERSION = 1
+
+__all__ = [
+    "DEFAULT_RUNTIME",
+    "DEFAULT_ZIG_TARGET",
+    "DEFAULT_PACKAGE_DIR",
+    "MANIFEST_RUNTIME_AUTO_FALLBACK",
+    "SCHEMA_VERSION",
+    "Any",
+    "Optional",
+    "resolve_runtime_for_manifest",
+    "default_zig_target",
+]
 
 
 def resolve_runtime_for_manifest(runtime):
     # type: (str) -> str
-    """Return the concrete runtime name to record in a manifest.
+    """返回要记录在清单中的具体运行环境名称。
 
-    ``"auto"`` is a build-time convenience and must not leak into manifests,
-    so it is normalised to the fallback. Any other value is passed through.
+    ``"auto"`` 是构建时便利选项，不能泄漏到清单中，
+    因此被规范化为回退值。其他任何值直接透传。
     """
     if runtime == DEFAULT_RUNTIME:
         return MANIFEST_RUNTIME_AUTO_FALLBACK
@@ -46,12 +59,13 @@ def resolve_runtime_for_manifest(runtime):
 
 def default_zig_target(config):
     # type: (dict) -> str
-    """Return the zig-target from *config* or the canonical default."""
+    """返回 *config* 中的 zig-target 或规范默认值。"""
     if config:
         return config.get("zig-target", DEFAULT_ZIG_TARGET)
     return DEFAULT_ZIG_TARGET
 
 if sys.version_info[0] >= 3:
-    from typing import Any  # noqa: F401  re-exported for callers
+    from typing import Any, Optional  # noqa: F401  re-exported for callers
 else:  # pragma: no cover - exercised on Python 2.7
     Any = None  # type: ignore
+    Optional = None  # type: ignore

@@ -1,8 +1,8 @@
-//! `datetime.datetime` conversion support.
+//! `datetime.datetime` 转换支持。
 //!
-//! Extracted from `convert.zig` to keep the core conversion module focused on
-//! primitive and container types. `DateTime` implements the `PymzConvert`
-//! trait so that `convert.toPy` / `convert.fromPy` pick it up automatically.
+//! 从 `convert.zig` 分离出来，使核心转换模块专注于基本类型和容器类型。
+//! `DateTime` 实现了 `PymzConvert` trait，因此 `convert.toPy` / `convert.fromPy`
+//! 会自动识别它。
 
 const std = @import("std");
 const c = @import("python_c");
@@ -14,10 +14,10 @@ const convert = @import("convert.zig");
 const Object = object.Object;
 const Error = errors.Error;
 
-/// A simple date/time value that maps to Python's `datetime.datetime`.
+/// 一个简单的日期/时间值，映射到 Python 的 `datetime.datetime`。
 ///
-/// Fields mirror the `datetime.datetime` constructor arguments. Optional
-/// fields default to zero, matching Python's behavior.
+/// 字段与 `datetime.datetime` 构造函数参数对应。可选字段默认为零，
+/// 与 Python 的行为一致。
 pub const DateTime = struct {
     pub const PymzConvert = struct {
         pub fn intoPy(value: DateTime) Error!*Object {

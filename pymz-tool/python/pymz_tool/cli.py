@@ -1,6 +1,6 @@
-"""Pure-Python CLI for pymz-tool.
+"""pymz-tool 的纯 Python CLI。
 
-Usage::
+用法::
 
     pymz-tool build    [--release|--debug] [-o DIR] [--runtime RT]
                        [--module NAME] [--distribution NAME]
@@ -17,7 +17,7 @@ Usage::
     pymz-tool develop  [-o DIR] [--runtime RT] [--zig-target STEP]
     pymz-tool config
 """
-from __future__ import print_function
+from __future__ import print_function, absolute_import
 
 import argparse
 import json
@@ -31,8 +31,10 @@ from .errors import PymzError
 from .matrix import build_one_cell, run_matrix
 from .backend import build_editable as _do_editable
 
+__all__ = ["main"]
+
 def _add_project_args(parser):
-    """Add project-identity overrides shared by ``build`` and ``matrix``."""
+    """添加 ``build`` 和 ``matrix`` 共享的项目标识覆盖参数。"""
     parser.add_argument("--module", help="Extension module name")
     parser.add_argument("--distribution", help="Distribution name")
     parser.add_argument("--package-dir", help="Python package source directory")
@@ -40,9 +42,9 @@ def _add_project_args(parser):
 
 
 def _add_build_args(parser):
-    """Add build-mode and output overrides shared by ``build`` and ``matrix``."""
+    """添加 ``build`` 和 ``matrix`` 共享的构建模式和输出覆盖参数。"""
     parser.add_argument("--release", action="store_true", default=None,
-                        help="Build in release mode (default)")
+                        help="Build in release mode (default; explicit no-op)")
     parser.add_argument("--debug", action="store_true",
                         help="Build in debug mode")
     parser.add_argument("-o", "--out", help="Output directory (default: dist)")
@@ -85,6 +87,12 @@ def _build_parser():
     develop.add_argument("--runtime", default=None,
                          help="Runtime: auto, cpython2, cpython3, cpython3-limited")
     develop.add_argument("--zig-target", help="Zig build step name")
+    develop.add_argument("--release", action="store_true", default=None,
+                         help="Build in release mode")
+    develop.add_argument("--debug", action="store_true",
+                         help="Build in debug mode (default for develop)")
+    develop.add_argument("--pymz-backend-source",
+                         help="Backend source path(s), semicolon-separated")
 
     sub.add_parser("config", help="Print current [tool.pymz] configuration")
 
@@ -93,7 +101,7 @@ def _build_parser():
 
 
 def _resolve_project(root, opts):
-    """Resolve project info from config + CLI overrides."""
+    """从配置 + CLI 覆盖解析项目信息。"""
     project = get_project_info(root)
     if getattr(opts, "module", None):
         project["module"] = opts.module
@@ -106,29 +114,31 @@ def _resolve_project(root, opts):
     return project
 
 
-def _resolve_release(opts):
+def _resolve_release(opts, default=True):
+    """解析构建模式。*default* 在未显式指定 --release/--debug 时使用。"""
     if getattr(opts, "debug", False):
         return False
-    return True
+    if getattr(opts, "release", None) is not None:
+        return True
+    return default
+
+
+def _split_list(raw, sep, default=None):
+    """将分隔字符串分割为去除空白的列表。空时返回 *default*。"""
+    if not raw:
+        return default
+    parts = [p.strip() for p in raw.split(sep) if p.strip()]
+    return parts if parts else default
 
 
 def _split_backend_sources(raw):
-    """Split a semicolon-separated backend source string into a list.
-
-    Returns ``[None]`` when *raw* is falsy so callers can always iterate.
-    """
-    if not raw:
-        return [None]
-    parts = [p.strip() for p in raw.split(";") if p.strip()]
-    return parts if parts else [None]
+    """将分号分隔的后端源字符串分割为列表。空时返回 ``[None]``。"""
+    return _split_list(raw, ";", [None])
 
 
 def _split_csv(raw):
-    """Split a comma-separated string into a stripped list, or ``None``."""
-    if not raw:
-        return None
-    parts = [p.strip() for p in raw.split(",") if p.strip()]
-    return parts if parts else None
+    """将逗号分隔的字符串分割为列表。空时返回 ``None``。"""
+    return _split_list(raw, ",", None)
 
 
 def _cmd_build(root, opts):
@@ -166,7 +176,7 @@ def _cmd_matrix(root, opts):
     out_dir = Path(opts.out) if opts.out else root / "dist"
     release = _resolve_release(opts)
 
-    # CLI overrides replace [tool.pymz.matrix] entirely when any is provided.
+    # CLI 覆盖在提供任何参数时完全替换 [tool.pymz.matrix]。
     cli_overrides = None
     runtimes = _split_csv(opts.runtimes) if opts.runtimes else None
     python_versions = _split_csv(opts.python_versions) if opts.python_versions else None
@@ -211,6 +221,7 @@ def _cmd_develop(root, opts):
     out_dir = Path(opts.out) if opts.out else root / "dist"
     runtime = opts.runtime or config.get("runtime", DEFAULT_RUNTIME)
     step = opts.zig_target or default_zig_target(config)
+    release = _resolve_release(opts, default=False)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     config_settings = {}
@@ -218,12 +229,15 @@ def _cmd_develop(root, opts):
         config_settings["runtime"] = runtime
     if step:
         config_settings["zig-target"] = step
+    config_settings["release"] = release
+    if getattr(opts, "pymz_backend_source", None):
+        config_settings["backend-source"] = opts.pymz_backend_source
     _do_editable(str(out_dir), config_settings=config_settings)
     return 0
 
 
 def _cmd_config(root, opts):
-    """Print a summary of the current pymz build configuration."""
+    """打印当前 pymz 构建配置的摘要。"""
     config = load_config(root)
     if not config:
         print("No pymz.json or [tool.pymz] configuration found")
@@ -267,8 +281,8 @@ def main():
             _print_usage()
             return 1
     except PymzError as e:
-        # pymz failures are user-actionable: print a concise message and exit
-        # non-zero. Unexpected errors (bugs) propagate as tracebacks.
+        # pymz 失败是用户可操作的：打印简洁消息并退出非零。
+        # 意外错误（bug）以回溯形式传播。
         print("error: %s" % e, file=sys.stderr)
         return 1
 

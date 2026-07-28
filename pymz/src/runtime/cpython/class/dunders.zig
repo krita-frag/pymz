@@ -1,27 +1,27 @@
-//! Registry of Python special method ("dunder") names used during class generation.
+//! Python 特殊方法（"dunder"）名称注册表，用于类生成过程。
 //!
-//! Instead of maintaining a separate static list of "which dunders are handled
-//! by protocol builders", this module queries each builder's ``handled_dunders``
-//! constant at comptime. This eliminates the dual source of truth: the builders
-//! are the single source of truth for which dunders they handle, and this
-//! module just aggregates their answers.
+//! 本模块不维护独立的"哪些 dunder 被协议构建器处理"的静态列表，而是在编译期
+//! 查询每个构建器的 ``handled_dunders`` 常量。这消除了双重真相源：构建器是
+//! 其处理哪些 dunder 的唯一真相源，本模块仅聚合它们的答案。
 //!
-//! Users can still extend the registry per-class by declaring:
+//! 用户可通过 ``pymz_meta`` 按类扩展注册表：
 //!
-//!   pub const __pymz_excluded_dunders__ = &.{"__await__", "__aiter__"};
-//!   pub const __pymz_handled_dunders__  = &.{"__await__"};
+//!   pub const pymz_meta = .{
+//!       .excluded_dunders = &.{"__await__", "__aiter__"},
+//!       .handled_dunders  = &.{"__await__"},
+//!   };
 //!
-//! `__pymz_handled_dunders__` takes precedence: a handled dunder is routed to
-//! the protocol subsystem, while an excluded dunder is simply dropped.
+//! ``handled_dunders`` 优先级更高：被处理的 dunder 路由到协议子系统，
+//! 而被排除的 dunder 则直接丢弃。
 
 const std = @import("std");
 const repr_mod = @import("repr.zig");
 const protocol_mod = @import("protocol.zig");
 
 pub const Category = enum {
-    /// Handled by a dedicated protocol builder, not the generic method table.
+    /// 由专门的协议构建器处理，而非通用方法表。
     handled,
-    /// Ignored entirely.
+    /// 完全忽略。
     excluded,
 };
 
@@ -30,8 +30,8 @@ pub const Entry = struct {
     category: Category,
 };
 
-/// Collect all dunder names handled by protocol builders for type T.
-/// Single source of truth shared by `classEntries` and `isHandledByBuilder`.
+/// 收集类型 T 的所有协议构建器处理的 dunder 名称。
+/// 由 `classEntries` 和 `isHandledByBuilder` 共享的唯一真相源。
 fn builderDunders(comptime T: type) []const []const u8 {
     comptime {
         var result: []const []const u8 = &.{};
@@ -46,14 +46,13 @@ fn builderDunders(comptime T: type) []const []const u8 {
     }
 }
 
-/// Check if a dunder name is handled by any protocol builder for type T.
+/// 检查类型 T 的某个 dunder 名称是否被任何协议构建器处理。
 ///
-/// Delegates to `builderDunders` so the builder dunder registry is defined
-/// exactly once. ``__new__`` and ``__del__`` are checked via ``@hasDecl``
-/// directly to avoid a circular import through ``methods.zig`` →
-/// ``class_builder.zig``.
+/// 委托给 `builderDunders`，使构建器 dunder 注册表只定义一次。
+/// ``__new__`` 和 ``__del__`` 通过 ``@hasDecl`` 直接检查，以避免经过
+/// ``methods.zig`` → ``class_builder.zig`` 的循环导入。
 fn isHandledByBuilder(comptime T: type, comptime name: []const u8) bool {
-    // Lifecycle dunders (checked directly to avoid circular import).
+    // 生命周期特殊方法（直接检查以避免循环导入）。
     if (std.mem.eql(u8, name, "__new__")) return @hasDecl(T, "__new__");
     if (std.mem.eql(u8, name, "__del__")) return @hasDecl(T, "__del__");
     return for (builderDunders(T)) |dn| {
@@ -61,15 +60,28 @@ fn isHandledByBuilder(comptime T: type, comptime name: []const u8) bool {
     } else false;
 }
 
-/// Build the combined entry list: builder-handled dunders + per-class overrides.
+/// 构建合并的条目列表：构建器处理的 dunder + 按类的覆盖项。
 inline fn classEntries(comptime T: type) []const Entry {
     comptime {
-        const handled = if (@hasDecl(T, "__pymz_handled_dunders__")) T.__pymz_handled_dunders__ else &[_][]const u8{};
-        const excluded = if (@hasDecl(T, "__pymz_excluded_dunders__")) T.__pymz_excluded_dunders__ else &[_][]const u8{};
+        @setEvalBranchQuota(2000);
+        const handled = blk: {
+            if (@hasDecl(T, "pymz_meta")) {
+                const meta = T.pymz_meta;
+                if (@hasField(@TypeOf(meta), "handled_dunders")) break :blk meta.handled_dunders;
+            }
+            break :blk &[_][]const u8{};
+        };
+        const excluded = blk: {
+            if (@hasDecl(T, "pymz_meta")) {
+                const meta = T.pymz_meta;
+                if (@hasField(@TypeOf(meta), "excluded_dunders")) break :blk meta.excluded_dunders;
+            }
+            break :blk &[_][]const u8{};
+        };
 
         const builder_list = builderDunders(T);
         var builder_count: usize = builder_list.len;
-        // __new__ and __del__ if declared.
+        // 如果声明了 __new__ 和 __del__，则计入。
         if (@hasDecl(T, "__new__")) builder_count += 1;
         if (@hasDecl(T, "__del__")) builder_count += 1;
 
@@ -77,7 +89,7 @@ inline fn classEntries(comptime T: type) []const Entry {
         var buf: [total]Entry = undefined;
         var idx: usize = 0;
 
-        // Builder-handled dunders.
+        // 构建器处理的 dunder。
         for (builder_list) |dn| {
             buf[idx] = .{ .name = dn, .category = .handled };
             idx += 1;
@@ -90,12 +102,12 @@ inline fn classEntries(comptime T: type) []const Entry {
             buf[idx] = .{ .name = "__del__", .category = .handled };
             idx += 1;
         }
-        // Per-class handled overrides.
+        // 按类处理的覆盖项。
         for (handled) |dn| {
             buf[idx] = .{ .name = dn, .category = .handled };
             idx += 1;
         }
-        // Per-class excluded overrides.
+        // 按类排除的覆盖项。
         for (excluded) |dn| {
             buf[idx] = .{ .name = dn, .category = .excluded };
             idx += 1;
@@ -106,7 +118,7 @@ inline fn classEntries(comptime T: type) []const Entry {
     }
 }
 
-/// Lookup a dunder entry for class `T`.
+/// 查找类 `T` 的 dunder 条目。
 pub inline fn find(comptime T: type, comptime name: []const u8) ?Category {
     const entries = classEntries(T);
     inline for (entries) |entry| {
@@ -117,14 +129,13 @@ pub inline fn find(comptime T: type, comptime name: []const u8) ?Category {
     return null;
 }
 
-/// True if the dunder should not appear in the regular method table for class `T`.
-/// This covers both "handled" dunders (routed to protocol builders) and
-/// "excluded" dunders (dropped entirely).
+/// 如果 dunder 不应该出现在类 `T` 的常规方法表中，则返回 true。
+/// 这包括"已处理"的 dunder（路由到协议构建器）和"已排除"的 dunder（直接丢弃）。
 pub inline fn isReservedDunder(comptime T: type, comptime name: []const u8) bool {
     return find(T, name) != null;
 }
 
-/// True if the dunder is handled by a protocol builder for class `T`.
+/// 如果 dunder 由类 `T` 的协议构建器处理，则返回 true。
 pub inline fn isHandled(comptime T: type, comptime name: []const u8) bool {
     return find(T, name) == .handled;
 }

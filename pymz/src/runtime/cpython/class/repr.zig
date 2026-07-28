@@ -1,4 +1,4 @@
-//! Repr/str and iterator protocol generation for Zig-backed classes.
+//! 为 Zig 支持的类生成 Repr/str 和迭代器协议。
 
 const std = @import("std");
 const c = @import("python_c");
@@ -13,8 +13,8 @@ pub fn ReprBuilder(comptime T: type) type {
         pub const has_repr = @hasDecl(T, "__repr__");
         pub const has_str = @hasDecl(T, "__str__");
 
-        /// Dunder names this builder handles when declared on T. This is the
-        /// single source of truth consumed by `dunders.isReservedDunder`.
+        /// 当在 T 上声明时，本构建器处理的 dunder 名称。这是
+        /// `dunders.isReservedDunder` 消费的唯一真相源。
         pub const handled_dunders: []const []const u8 = blk: {
             var names: []const []const u8 = &.{};
             if (has_repr) names = names ++ .{"__repr__"};
@@ -31,23 +31,18 @@ pub fn ReprBuilder(comptime T: type) type {
         }
 
         pub fn py_repr(py_self: ?*c.PyObject) callconv(.c) ?*c.PyObject {
-            // Defensive: this branch is unreachable because `py_repr` is only
-            // installed as `tp_repr` when `has_repr` is true. Kept as a safety
-            // net in case the function is ever called directly.
+            // 不可达：py_repr 仅在 has_repr 为 true 时才会被安装为 tp_repr。
+            // 如果此不变量被破坏，使用 @panic 而不是 PyObject_Repr 来防止无限递归
+            // (PyObject_Repr 调用 tp_repr -> py_repr -> ...)。
             if (!has_repr) {
-                const py = py_self orelse return null;
-                return c.PyObject_Repr(py);
+                @panic("py_repr called on type without __repr__");
             }
             return protocolString("__repr__", py_self);
         }
 
         pub fn py_str(py_self: ?*c.PyObject) callconv(.c) ?*c.PyObject {
-            // Defensive: this branch is unreachable because `py_str` is only
-            // installed as `tp_str` when `has_str` is true. Kept as a safety
-            // net in case the function is ever called directly.
             if (!has_str) {
-                const py = py_self orelse return null;
-                return c.PyObject_Str(py);
+                @panic("py_str called on type without __str__");
             }
             return protocolString("__str__", py_self);
         }
@@ -96,7 +91,7 @@ pub fn IteratorBuilder(comptime T: type) type {
             if (info == .error_union) {
                 const payload = result catch |err| {
                     if (err == error.PyError) return null;
-                    errors.typeError("iterator error: {s}", .{@errorName(err)});
+                    errors.mapError(err);
                     return null;
                 };
                 const payload_info = @typeInfo(info.error_union.payload);
@@ -118,7 +113,7 @@ pub fn IteratorBuilder(comptime T: type) type {
 }
 const testing = std.testing;
 
-test "ReprBuilder detects __repr__ declaration" {
+test "ReprBuilder 检测 __repr__ 声明" {
     const WithRepr = struct {
         pub fn __repr__(self: *const @This()) []const u8 {
             _ = self;
@@ -130,7 +125,7 @@ test "ReprBuilder detects __repr__ declaration" {
     try testing.expect(!ReprBuilder(WithoutRepr).has_repr);
 }
 
-test "ReprBuilder detects __str__ declaration" {
+test "ReprBuilder 检测 __str__ 声明" {
     const WithStr = struct {
         pub fn __str__(self: *const @This()) []const u8 {
             _ = self;
@@ -142,7 +137,7 @@ test "ReprBuilder detects __str__ declaration" {
     try testing.expect(!ReprBuilder(WithoutStr).has_str);
 }
 
-test "ReprBuilder detects both __repr__ and __str__ independently" {
+test "ReprBuilder 独立检测 __repr__ 和 __str__" {
     const Both = struct {
         pub fn __repr__(self: *const @This()) []const u8 {
             _ = self;
@@ -158,7 +153,7 @@ test "ReprBuilder detects both __repr__ and __str__ independently" {
     try testing.expect(R.has_str);
 }
 
-test "IteratorBuilder detects __iter__ and __next__" {
+test "IteratorBuilder 检测 __iter__ 和 __next__" {
     const Iterable = struct {
         pub fn __iter__(self: *@This()) *@This() {
             return self;

@@ -1,4 +1,4 @@
-//! Core Python object protocol and basic types (Str, Bytes).
+//! 核心 Python 对象协议及基本类型（Str、Bytes）。
 
 const std = @import("std");
 const c = @import("python_c");
@@ -8,27 +8,24 @@ const compat = @import("compat.zig");
 const version = @import("version.zig");
 const Error = errors.Error;
 
-/// Description of a Python buffer exported by a class `__buffer__` method.
-/// Returning this from `__buffer__` enables multi-dimensional and/or strided
-/// buffer views.  Returning a plain `[]u8`/`[]const u8` is still supported as
-/// a shorthand for a one-dimensional read/write byte buffer.
+/// 由类 `__buffer__` 方法导出的 Python 缓冲区描述。
+/// 从 `__buffer__` 返回此结构可启用多维和/或带步幅的缓冲区视图。
+/// 返回纯 `[]u8`/`[]const u8` 仍被支持，作为一维读/写字节缓冲区的简写。
 pub const Buffer = struct {
-    /// Pointer to the first element. The data must remain valid until the
-    /// buffer is released.
+    /// 指向第一个元素的指针。数据在缓冲区被释放前必须保持有效。
     ptr: [*]u8,
 
-    /// Shape of the buffer. `shape.len` is the number of dimensions.
+    /// 缓冲区的形状。`shape.len` 是维度数。
     shape: []const usize,
 
-    /// Optional strides in bytes for each dimension. If `null`, the buffer is
-    /// assumed to be C-contiguous.
+    /// 每个维度可选的字节步幅。如果为 `null`，缓冲区被认为是 C 连续的。
     strides: ?[]const isize = null,
 
-    /// PEP-3118 format string. If `null`, memoryview infers unsigned bytes.
-    /// Common values: "B" (u8), "b" (i8), "i" (i32), "f" (f32), "d" (f64).
+    /// PEP-3118 格式字符串。如果为 `null`，memoryview 推断为无符号字节。
+    /// 常见值："B"（u8）、"b"（i8）、"i"（i32）、"f"（f32）、"d"（f64）。
     format: ?[]const u8 = null,
 
-    /// True if the buffer is read-only.
+    /// 如果缓冲区为只读，则为 true。
     readonly: bool = false,
 };
 
@@ -37,24 +34,32 @@ pub const Object = extern struct {
 
     pub const IS_PYOBJECT = true;
 
+    /// 将此包装器转换为原始 `*c.PyObject`。所有 extern-struct 包装器
+    ///（`Object`、`Str`、`Int`...）共享与 `PyObject` 相同的布局（偏移量为零），
+    /// 因此转换是零成本的。使用此方法代替在每个 C-API 调用点写出
+    /// `@as(*c.PyObject, @ptrCast(self))`。
+    pub inline fn asPy(self: *const Object) *c.PyObject {
+        return @ptrCast(@constCast(self));
+    }
+
     pub inline fn incref(self: *Object) void {
-        c.Py_IncRef(@as(*c.PyObject, @ptrCast(self)));
+        c.Py_IncRef(self.asPy());
     }
 
     pub inline fn decref(self: *Object) void {
-        c.Py_DecRef(@as(*c.PyObject, @ptrCast(self)));
+        c.Py_DecRef(self.asPy());
     }
 
-    /// Return a new reference to this object. The caller must decref it.
+    /// 返回此对象的新引用。调用方必须 decref 它。
     pub inline fn newref(self: *Object) *Object {
         self.incref();
         return self;
     }
 
-    /// Reference-counting helpers that can be shared by other PyObject-like
-    /// wrapper structs.  `extern struct` wrappers cannot use `usingnamespace`,
-    /// so each wrapper declares `incref`/`decref`/`newref` and forwards to these
-    /// static helpers.  The implementation is still unified in one place.
+    /// 可被其他类似 PyObject 的包装器结构体共享的引用计数辅助函数。
+    /// `extern struct` 包装器不能使用 `usingnamespace`，因此每个包装器声明
+    /// `incref`/`decref`/`newref` 并转发给这些静态辅助函数。实现仍然
+    /// 统一在一个地方。
     pub const RefCount = struct {
         pub inline fn incref(comptime Self: type, self: *Self) void {
             @as(*Object, @ptrCast(self)).incref();
@@ -68,7 +73,7 @@ pub const Object = extern struct {
     };
 
     pub inline fn refcnt(self: *const Object) isize {
-        return c.Py_REFCNT(@as(*c.PyObject, @ptrCast(@constCast(self))));
+        return c.Py_REFCNT(self.asPy());
     }
 
     pub inline fn isNone(self: *const Object) bool {
@@ -80,28 +85,22 @@ pub const Object = extern struct {
     }
 
     pub inline fn isBool(self: *Object) bool {
-        return compat.cApiBool(c.pymz_PyBool_Check(@as(*c.PyObject, @ptrCast(self))));
+        return compat.cApiBool(c.pymz_PyBool_Check(self.asPy()));
     }
 
-    pub inline fn asBool(self: *Object) bool {
-        return c.PyObject_IsTrue(@as(*c.PyObject, @ptrCast(self))) != 0;
+    pub inline fn asBool(self: *Object) Error!bool {
+        return compat.cApiTriState(c.PyObject_IsTrue(self.asPy()));
     }
 
-    /// True when the object is a Python int (Py3 `int` / Py2 `int` or `long`).
+    /// 当对象是 Python 整数（Py3 `int` / Py2 `int` 或 `long`）时为真。
     pub inline fn isInt(self: *Object) bool {
-        const py: *c.PyObject = @as(*c.PyObject, @ptrCast(self));
-        if (version.is_py3) {
-            return compat.cApiBool(c.PyLong_Check(py));
-        }
-        // Python 2 distinguishes int and long; both are integers.
-        return compat.cApiBool(c.pymz_PyInt_Check(py)) or
-            compat.cApiBool(c.PyLong_Check(py));
+        return compat.intCheck(self.asPy());
     }
 
-    /// Convert a Python int object to a Zig integer type with range checking.
-    /// On overflow a Python `OverflowError` is set and `error.PyError` returned.
+    /// 将 Python 整数对象转换为带范围检查的 Zig 整数类型。
+    /// 溢出时设置 Python `OverflowError` 并返回 `error.PyError`。
     pub inline fn asInt(self: *Object, comptime T: type) Error!T {
-        const py: *c.PyObject = @as(*c.PyObject, @ptrCast(self));
+        const py: *c.PyObject = self.asPy();
         switch (@typeInfo(T)) {
             .int => |info| {
                 if (info.signedness == .signed) {
@@ -124,18 +123,17 @@ pub const Object = extern struct {
         }
     }
 
-    /// True when the object is a Python `float`.
+    /// 当对象是 Python `float` 时为真。
     pub inline fn isFloat(self: *Object) bool {
-        return compat.cApiBool(c.PyFloat_Check(@as(*c.PyObject, @ptrCast(self))));
+        return compat.cApiBool(c.PyFloat_Check(self.asPy()));
     }
 
-    /// Convert a Python float object to a Zig float type. `PyFloat_AsDouble`
-    /// returns `-1.0` on failure and sets an exception, which is surfaced as
-    /// `error.PyError`.
+    /// 将 Python float 对象转换为 Zig float 类型。`PyFloat_AsDouble` 在失败时
+    /// 返回 `-1.0` 并设置异常，表现为 `error.PyError`。
     pub inline fn asFloat(self: *Object, comptime T: type) Error!T {
         switch (@typeInfo(T)) {
             .float => {
-                const v = c.PyFloat_AsDouble(@as(*c.PyObject, @ptrCast(self)));
+                const v = c.PyFloat_AsDouble(self.asPy());
                 if (v == -1.0 and errors.errorOccurred() != null) return error.PyError;
                 return @floatCast(v);
             },
@@ -148,37 +146,39 @@ pub const Object = extern struct {
     }
 
     pub inline fn isList(self: *Object) bool {
-        return compat.cApiBool(c.PyList_Check(@as(*c.PyObject, @ptrCast(self))));
+        return compat.cApiBool(c.PyList_Check(self.asPy()));
     }
 
     pub inline fn isTuple(self: *Object) bool {
-        return compat.cApiBool(c.PyTuple_Check(@as(*c.PyObject, @ptrCast(self))));
+        return compat.cApiBool(c.PyTuple_Check(self.asPy()));
     }
 
     pub inline fn isDict(self: *Object) bool {
-        return compat.cApiBool(c.PyDict_Check(@as(*c.PyObject, @ptrCast(self))));
+        return compat.cApiBool(c.PyDict_Check(self.asPy()));
     }
 
     pub inline fn sequenceLength(self: *Object) Error!usize {
-        const len = c.PyObject_Size(@as(*c.PyObject, @ptrCast(self)));
+        errors.assertGILHeldByCurrentThread();
+        const len = c.PyObject_Size(self.asPy());
         if (len < 0) return error.PyError;
         return @intCast(len);
     }
 
-    /// Borrow an item from a list or tuple. The returned reference is owned by
-    /// the container and must not be decref'd by the caller unless explicitly
-    /// incref'd.
+    /// 从列表或元组中借用元素。返回的引用由容器拥有，调用方除非显式 incref，
+    /// 否则不得 decref。对非 list/tuple 对象返回 `null`；如需对任意实现了
+    /// `__getitem__` 的对象取元素，请使用 `getItem`（返回新引用）。
     pub inline fn sequenceGet(self: *Object, index: usize) ?*Object {
+        errors.assertGILHeldByCurrentThread();
         if (self.isList()) {
             const item = c.PyList_GetItem(
-                @as(*c.PyObject, @ptrCast(self)),
+                self.asPy(),
                 @as(c.Py_ssize_t, @intCast(index)),
             );
             return @as(?*Object, @ptrCast(item));
         }
         if (self.isTuple()) {
             const item = c.PyTuple_GetItem(
-                @as(*c.PyObject, @ptrCast(self)),
+                self.asPy(),
                 @as(c.Py_ssize_t, @intCast(index)),
             );
             return @as(?*Object, @ptrCast(item));
@@ -186,9 +186,25 @@ pub const Object = extern struct {
         return null;
     }
 
+    /// 对任意实现了 `__getitem__` 的对象按下标取元素。返回**新引用**，
+    /// 调用方负责 `decref()`。失败时设置 Python 异常并返回 `error.PyError`。
+    /// 与 `sequenceGet` 的区别：
+    /// - `sequenceGet` 仅支持 list/tuple，返回借用引用（无需 decref）。
+    /// - `getItem` 支持任意序列/映射类型，返回新引用（必须 decref）。
+    pub inline fn getItem(self: *Object, index: isize) Error!*Object {
+        errors.assertGILHeldByCurrentThread();
+        const idx_obj = compat.intFromSigned(index) orelse return error.PyError;
+        defer decrefRaw(idx_obj);
+        if (c.PyObject_GetItem(self.asPy(), idx_obj)) |item| {
+            return @ptrCast(item);
+        }
+        return error.PyError;
+    }
+
     pub inline fn listSet(self: *Object, index: usize, item: *Object) Error!void {
+        errors.assertGILHeldByCurrentThread();
         if (c.PyList_SetItem(
-            @as(*c.PyObject, @ptrCast(self)),
+            self.asPy(),
             @as(c.Py_ssize_t, @intCast(index)),
             @ptrCast(item),
         ) < 0) {
@@ -198,28 +214,30 @@ pub const Object = extern struct {
     }
 
     pub inline fn dictItems(self: *Object) Error!*Object {
-        if (c.PyDict_Items(@as(*c.PyObject, @ptrCast(self)))) |items| {
+        errors.assertGILHeldByCurrentThread();
+        if (c.PyDict_Items(self.asPy())) |items| {
             return @ptrCast(items);
         }
         return error.PyError;
     }
 
-    /// Borrow the value associated with `key` from a dict. The returned
-    /// reference is owned by the dict and must not be decref'd unless
-    /// explicitly incref'd.
+    /// 从字典中借用与 `key` 关联的值。返回的引用由字典拥有，除非显式 incref，
+    /// 否则不得 decref。
     pub inline fn dictGetString(self: *Object, key: []const u8) Error!?*Object {
+        errors.assertGILHeldByCurrentThread();
         const key_object = try Str.fromSlice(key);
         defer key_object.decref();
         const item = c.PyDict_GetItem(
-            @as(*c.PyObject, @ptrCast(self)),
+            self.asPy(),
             @as(*c.PyObject, @ptrCast(key_object)),
         );
         return @as(?*Object, @ptrCast(item));
     }
 
     pub inline fn dictSet(self: *Object, key: *Object, value: *Object) Error!void {
+        errors.assertGILHeldByCurrentThread();
         if (c.PyDict_SetItem(
-            @as(*c.PyObject, @ptrCast(self)),
+            self.asPy(),
             @as(*c.PyObject, @ptrCast(key)),
             @as(*c.PyObject, @ptrCast(value)),
         ) < 0) {
@@ -228,34 +246,33 @@ pub const Object = extern struct {
     }
 
     pub inline fn getAttrString(self: *Object, name: [:0]const u8) Error!*Object {
-        if (c.PyObject_GetAttrString(@as(*c.PyObject, @ptrCast(self)), name)) |r| {
+        if (c.PyObject_GetAttrString(self.asPy(), name)) |r| {
             return @as(*Object, @ptrCast(r));
         }
         return error.PyError;
     }
 
     pub inline fn setAttrString(self: *Object, name: [:0]const u8, value: ?*Object) Error!void {
-        if (c.PyObject_SetAttrString(@as(*c.PyObject, @ptrCast(self)), name, @ptrCast(value)) < 0) {
+        if (c.PyObject_SetAttrString(self.asPy(), name, @ptrCast(value)) < 0) {
             return error.PyError;
         }
     }
 
-    /// Borrow the UTF-8 bytes backing a string object. The slice is valid only
-    /// while `self` is alive.
+    /// 借用字符串对象的 UTF-8 字节。切片仅在 `self` 存活期间有效。
     pub inline fn asString(self: *Object) Error![:0]const u8 {
         return Str.asString(@ptrCast(self));
     }
 
     pub inline fn isInstance(self: *Object, typ: *Type) Error!bool {
         const rc = c.PyObject_IsInstance(
-            @as(*c.PyObject, @ptrCast(self)),
+            self.asPy(),
             @as(*c.PyObject, @ptrCast(typ)),
         );
         return compat.cApiTriState(rc);
     }
 };
 
-/// Raw reference counting helpers that keep version-specific macros in C.
+/// 将版本特定的宏保留在 C 中的原始引用计数辅助函数。
 pub inline fn increfRaw(op: *c.PyObject) void {
     c.pymz_Py_INCREF(op);
 }
@@ -289,6 +306,10 @@ pub const Type = extern struct {
 
     pub const IS_PYOBJECT = true;
 
+    pub inline fn asPy(self: *const Type) *c.PyObject {
+        return @ptrCast(@constCast(self));
+    }
+
     pub inline fn incref(self: *Type) void {
         Object.RefCount.incref(Type, self);
     }
@@ -304,6 +325,10 @@ pub const Str = extern struct {
     impl: c.PyObject,
 
     pub const IS_PYOBJECT = true;
+
+    pub inline fn asPy(self: *const Str) *c.PyObject {
+        return @ptrCast(@constCast(self));
+    }
 
     pub inline fn incref(self: *Str) void {
         Object.RefCount.incref(Str, self);
@@ -325,25 +350,24 @@ pub const Str = extern struct {
     }
 
     pub inline fn fromFormat(comptime fmt: []const u8, args: anytype) Error!*Str {
-        const buf = try std.fmt.allocPrintZ(mem.allocator, fmt, args);
+        const buf = try std.fmt.allocPrintSentinel(mem.allocator, fmt, args, 0);
         defer mem.allocator.free(buf);
         return fromSlice(buf);
     }
 
-    /// Borrow the UTF-8 bytes backing the string. The returned slice is valid
-    /// only while `self` is alive. Returns `error.PyError` if the object is not
-    /// a valid string (Python exception is already set).
+    /// 借用字符串的 UTF-8 字节。返回的切片仅在 `self` 存活期间有效。
+    /// 如果对象不是有效字符串则返回 `error.PyError`（Python 异常已设置）。
     pub inline fn asString(self: *Str) Error![:0]const u8 {
-        if (compat.strAsString(@as(*c.PyObject, @ptrCast(self)))) |s| {
+        if (compat.strAsString(self.asPy())) |s| {
             return s;
         }
         return error.PyError;
     }
 };
 
-/// Create a new Unicode text object (`unicode` on Python 2, `str` on Python 3).
-/// On Python 3 this is identical to `Str.fromSlice`; on Python 2 it always
-/// produces a `unicode` object regardless of the `str` type.
+/// 创建新的 Unicode 文本对象（Python 2 上为 `unicode`，Python 3 上为 `str`）。
+/// Python 3 上与 `Str.fromSlice` 相同；Python 2 上无论 `str` 类型如何，
+/// 始终产生 `unicode` 对象。
 pub fn unicodeFromSlice(s: []const u8) Error!*Object {
     if (compat.unicodeFromSlice(s)) |r| return @as(*Object, @ptrCast(r));
     return error.PyError;
@@ -353,6 +377,10 @@ pub const Bytes = extern struct {
     impl: c.PyObject,
 
     pub const IS_PYOBJECT = true;
+
+    pub inline fn asPy(self: *const Bytes) *c.PyObject {
+        return @ptrCast(@constCast(self));
+    }
 
     pub inline fn incref(self: *Bytes) void {
         Object.RefCount.incref(Bytes, self);
@@ -373,11 +401,11 @@ pub const Bytes = extern struct {
         return error.PyError;
     }
 
-    /// Return the bytes backing the object. The returned slice borrows from `self`.
-    /// Returns `error.PyError` on failure (Python exception is already set).
+    /// 返回对象背后的字节。返回的切片从 `self` 借用。
+    /// 失败时返回 `error.PyError`（Python 异常已设置）。
     pub inline fn asSlice(self: *Bytes) Error![]const u8 {
         var size: c.Py_ssize_t = 0;
-        const ptr = compat.bytesAsSlice(@as(*c.PyObject, @ptrCast(self)), &size) orelse return error.PyError;
+        const ptr = compat.bytesAsSlice(self.asPy(), &size) orelse return error.PyError;
         return ptr[0..@as(usize, @intCast(size))];
     }
 };
@@ -386,6 +414,10 @@ pub const ByteArray = extern struct {
     impl: c.PyObject,
 
     pub const IS_PYOBJECT = true;
+
+    pub inline fn asPy(self: *const ByteArray) *c.PyObject {
+        return @ptrCast(@constCast(self));
+    }
 
     pub inline fn incref(self: *ByteArray) void {
         Object.RefCount.incref(ByteArray, self);
@@ -408,10 +440,10 @@ pub const ByteArray = extern struct {
         return error.PyError;
     }
 
-    /// Return the bytes backing the bytearray. The returned slice borrows from `self`.
+    /// 返回 bytearray 背后的字节。返回的切片从 `self` 借用。
     pub inline fn asSlice(self: *ByteArray) Error![]u8 {
         var size: c.Py_ssize_t = 0;
-        const ptr = compat.byteArrayAsSlice(@as(*c.PyObject, @ptrCast(self)), &size) orelse return error.PyError;
+        const ptr = compat.byteArrayAsSlice(self.asPy(), &size) orelse return error.PyError;
         return ptr[0..@as(usize, @intCast(size))];
     }
 };

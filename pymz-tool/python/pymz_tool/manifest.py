@@ -1,8 +1,7 @@
-"""Build manifest writer/reader for pymz extension artifacts.
+"""pymz 扩展产物的构建清单写入器/读取器。
 
-The manifest (``pymz-manifest.json``) is the single source of truth for the
-runtime loader. It is written during the build and read at import time by
-``pymz_tool.loader``.
+清单（``pymz-manifest.json``）是运行时加载器的单一真相源。
+它在构建时写入，在导入时由 ``pymz_tool.loader`` 读取。
 """
 from __future__ import absolute_import
 
@@ -10,10 +9,17 @@ import io
 import json
 import os
 
-from ._compat import Any  # noqa: F401
+from ._compat import Any, SCHEMA_VERSION  # noqa: F401
 
-SCHEMA_VERSION = 1
 MANIFEST_FILENAME = "pymz-manifest.json"
+
+__all__ = [
+    "SCHEMA_VERSION",
+    "MANIFEST_FILENAME",
+    "build_manifest",
+    "write_manifest",
+    "collect_artifacts",
+]
 
 
 def build_manifest(
@@ -28,9 +34,9 @@ def build_manifest(
     zig_target=None,       # type: str | None
 ):
     # type: (...) -> dict
-    """Build a manifest dict from build parameters.
+    """从构建参数构建清单字典。
 
-    *modules* can be a list of module names or a single module name string.
+    *modules* 可以是模块名称列表或单个模块名称字符串。
     """
     if isinstance(modules, str):
         modules = [modules]
@@ -51,7 +57,7 @@ def build_manifest(
 
 def write_manifest(manifest, output_dir):
     # type: (dict, Any) -> str
-    """Write *manifest* as ``pymz-manifest.json`` in *output_dir*. Returns the path."""
+    """将 *manifest* 写入 *output_dir* 中的 ``pymz-manifest.json``。返回路径。"""
     path = os.path.join(str(output_dir), MANIFEST_FILENAME)
     with io.open(path, "w", encoding="utf-8") as f:
         f.write(json.dumps(manifest, indent=2))
@@ -60,12 +66,11 @@ def write_manifest(manifest, output_dir):
 
 def collect_artifacts(lib_dir, modules):
     # type: (Any, Any) -> list
-    """Collect built artifacts from *lib_dir* for one or more *modules*.
+    """从 *lib_dir* 收集一个或多个 *modules* 的已构建产物。
 
-    *modules* can be a single module name string or a list of names.
+    *modules* 可以是单个模块名称字符串或名称列表。
 
-    Returns a list of ``{"filename": ..., "kind": "extension"|"stub",
-    "module": <module_name>}`` dicts.
+    返回 ``{"filename": ..., "kind": "extension"|"stub", "module": <module_name>}`` 字典的列表。
     """
     if isinstance(modules, str):
         modules = [modules]
@@ -80,12 +85,12 @@ def collect_artifacts(lib_dir, modules):
             continue
         if name == MANIFEST_FILENAME:
             continue
-        # Match against each module name.
+        # 与每个模块名称匹配（最长前缀匹配，避免 _foo 与 _foobar 碰撞）。
         matched_module = None
         for mod in modules:
             if name.startswith(mod):
-                matched_module = mod
-                break
+                if matched_module is None or len(mod) > len(matched_module):
+                    matched_module = mod
         if matched_module is None:
             continue
         if name.endswith(".pyi"):

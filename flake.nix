@@ -9,7 +9,7 @@
   };
 
   outputs = { self, nixpkgs, nixpkgs-legacy, flake-utils }:
-    flake-utils.lib.eachSystem [ "aarch64-darwin" "aarch64-linux" "x86_64-linux" ] (system:
+    flake-utils.lib.eachSystem [ "aarch64-darwin" "aarch64-linux" "x86_64-darwin" "x86_64-linux" ] (system:
       let
         pkgs = import nixpkgs { inherit system; };
         pkgsLegacy = import nixpkgs-legacy {
@@ -88,8 +88,8 @@
         #   and the pymz-tool wrapper (the CLI is Python 3 only).
         # - Every shell gets zig cache isolation and the common CLI tooling.
         # - Use `./examples/jsonz/test.sh` to build and test the jsonz example
-        #   against the active interpreter (see docs/development.md or the
-        #   example's README).
+        #   against the active interpreter (see AGENTS.md or the example's
+        #   README).
         mkShellFor = name: py:
           pkgs.mkShell {
             name = "pymz-${name}";

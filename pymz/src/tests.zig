@@ -1,7 +1,7 @@
-//! Aggregates comptime-safe unit tests for the pymz core library.
+//! pymz 核心库的编译期安全单元测试聚合。
 //!
-//! These tests do not require a Python interpreter and can be run with
-//! `zig test pymz/src/tests.zig` or through the workspace `zig build test`.
+//! 这些测试不需要 Python 解释器，可通过 `zig test pymz/src/tests.zig`
+//! 或通过工作区 `zig build test` 运行。
 
 const std = @import("std");
 const common = @import("runtime/cpython/declarative/common.zig");
@@ -10,8 +10,9 @@ const fn_descriptor = @import("runtime/cpython/declarative/function.zig");
 const class_descriptor = @import("runtime/cpython/declarative/class.zig");
 const limiter = @import("runtime/cpython/limiter.zig");
 const signature = @import("runtime/cpython/signature.zig");
+const convert = @import("runtime/cpython/convert.zig");
 
-// Pull in the pymz public API so the entire module is exercised.
+// 引入 pymz 公共 API，使整个模块被编译期检查覆盖。
 const pymz = @import("pymz.zig");
 comptime {
     _ = pymz;
@@ -60,9 +61,30 @@ test "positional string desc is treated as doc" {
     try std.testing.expect(opts.signature == null);
 }
 
+test "pymz_meta excluded_dunders extend the registry" {
+    const TestClass = struct {
+        pub const pymz_meta = .{
+            .excluded_dunders = &.{ "__await__", "__aiter__" },
+        };
+    };
+    try std.testing.expect(dunders.isReservedDunder(TestClass, "__await__"));
+    try std.testing.expect(dunders.isReservedDunder(TestClass, "__aiter__"));
+    try std.testing.expect(!dunders.isReservedDunder(TestClass, "__anext__"));
+}
+
+test "pymz_meta handled_dunders are marked handled" {
+    const TestClass = struct {
+        pub const pymz_meta = .{
+            .handled_dunders = &.{"__await__"},
+        };
+    };
+    try std.testing.expect(dunders.isHandled(TestClass, "__await__"));
+    try std.testing.expect(dunders.isReservedDunder(TestClass, "__await__"));
+}
+
 test "builtin handled dunders are excluded from method table" {
-    // The new dunders module queries builders, which check @hasDecl on T.
-    // Dunders are only reserved when the type actually declares them.
+    // 新的 dunders 模块查询构建器，构建器检查类型上是否有 @hasDecl。
+    // 仅当类型实际声明了 dunder 时，它才被保留。
     const TestClass = struct {
         pub fn __repr__(self: *const @This()) []const u8 {
             _ = self;
@@ -83,7 +105,7 @@ test "builtin handled dunders are excluded from method table" {
     try std.testing.expect(dunders.isReservedDunder(TestClass, "__len__"));
     try std.testing.expect(dunders.isReservedDunder(TestClass, "__call__"));
     try std.testing.expect(dunders.isReservedDunder(TestClass, "__del__"));
-    // Dunders NOT declared on the type are not reserved.
+    // 类型上未声明的 dunder 不会被保留。
     const EmptyClass = struct {};
     try std.testing.expect(!dunders.isReservedDunder(EmptyClass, "__repr__"));
     try std.testing.expect(!dunders.isReservedDunder(EmptyClass, "__len__"));
@@ -97,7 +119,9 @@ test "non-dunders and unknown dunders are not excluded" {
 
 test "per-class excluded dunders extend the registry" {
     const TestClass = struct {
-        pub const __pymz_excluded_dunders__ = &.{ "__await__", "__aiter__" };
+        pub const pymz_meta = .{
+            .excluded_dunders = &.{ "__await__", "__aiter__" },
+        };
     };
     try std.testing.expect(dunders.isReservedDunder(TestClass, "__await__"));
     try std.testing.expect(dunders.isReservedDunder(TestClass, "__aiter__"));
@@ -106,7 +130,9 @@ test "per-class excluded dunders extend the registry" {
 
 test "per-class handled dunders are marked handled" {
     const TestClass = struct {
-        pub const __pymz_handled_dunders__ = &.{"__await__"};
+        pub const pymz_meta = .{
+            .handled_dunders = &.{"__await__"},
+        };
     };
     try std.testing.expect(dunders.isHandled(TestClass, "__await__"));
     try std.testing.expect(dunders.isReservedDunder(TestClass, "__await__"));
@@ -123,9 +149,9 @@ test "isActiveForPlatform with no filter is always active" {
 
 test "isActiveForPlatform matches limited filter against platform" {
     comptime {
-        // The mock backend reports is_limited_api = false (full ABI).
-        // limited=true -> only active on limited ABI -> inactive here.
-        // limited=false -> only active on full ABI -> active here.
+        // mock 后端报告 is_limited_api = false（完整 ABI）。
+        // limited=true -> 仅限 limited ABI 上活跃 -> 此处不活跃。
+        // limited=false -> 仅限完整 ABI 上活跃 -> 此处活跃。
         try std.testing.expect(!limiter.isActiveForPlatform(true));
         try std.testing.expect(limiter.isActiveForPlatform(false));
     }
@@ -171,20 +197,20 @@ fn sigOptArg(a: i64, b: ?i64) i64 {
 
 test "buildMlDoc produces module-function signature with $module" {
     const doc = comptime signature.buildMlDoc("add", @TypeOf(sigTwoArgs), .module_func, "Add two ints.");
-    // The signature must start with the function name and open paren.
+    // 签名必须以函数名和左括号开头。
     try std.testing.expect(std.mem.startsWith(u8, doc, "add("));
-    // The hidden $module parameter must be present for module-level functions.
+    // 模块级函数必须包含隐藏的 $module 参数。
     try std.testing.expect(std.mem.indexOf(u8, doc, "$module") != null);
-    // The signature separator must follow the closing paren.
+    // 签名分隔符必须在右括号之后。
     try std.testing.expect(std.mem.indexOf(u8, doc, ")\n--\n\n") != null);
-    // The docstring text must appear after the separator.
+    // 文档字符串必须在分隔符之后出现。
     try std.testing.expect(std.mem.indexOf(u8, doc, "Add two ints.") != null);
 }
 
 test "buildMlDoc for static method omits hidden parameter" {
     const doc = comptime signature.buildMlDoc("static_fn", @TypeOf(sigTwoArgs), .static_method, null);
     try std.testing.expect(std.mem.startsWith(u8, doc, "static_fn("));
-    // Static methods must not have $module, $self, or $type.
+    // 静态方法不能有 $module、$self 或 $type。
     try std.testing.expect(std.mem.indexOf(u8, doc, "$module") == null);
     try std.testing.expect(std.mem.indexOf(u8, doc, "$self") == null);
     try std.testing.expect(std.mem.indexOf(u8, doc, "$type") == null);
@@ -207,7 +233,7 @@ test "buildMlDoc renders optional params with =None default" {
 
 test "buildMlDoc handles zero-argument functions" {
     const doc = comptime signature.buildMlDoc("void_fn", @TypeOf(sigVoidFn), .module_func, null);
-    // A zero-arg module function still has $module, then /.
+    // 零参数模块函数仍然有 $module，然后是 /。
     try std.testing.expect(std.mem.indexOf(u8, doc, "$module") != null);
     try std.testing.expect(std.mem.indexOf(u8, doc, ")\n--\n\n") != null);
 }
@@ -271,4 +297,113 @@ test "buildMlDocWithOptions varargs mode renders *args, **kwargs" {
     );
     try std.testing.expect(std.mem.indexOf(u8, doc, "*args") != null);
     try std.testing.expect(std.mem.indexOf(u8, doc, "**kwargs") != null);
+}
+
+// ---------------------------------------------------------------------------
+// classMeta 校验与 classMetaTemplate 模板辅助测试
+// ---------------------------------------------------------------------------
+
+const decl = pymz.py.decl;
+
+test "classMeta accepts all known fields" {
+    // 编译期通过即证明所有已知字段名都被接受；任何未知字段会触发 @compileError
+    // 让整个测试文件编译失败，因此本测试同时是"接受有效字段"和"拒绝无效字段"
+    // 的回归守卫——后者由编译器在编译期静态保证。
+    const meta = comptime decl.classMeta(.{
+        .readonly_fields = .{ .id = true },
+        .method_param_names = .{ .add = "x,y" },
+        .class_methods = .{ .create = true },
+        .handled_dunders = &.{"__await__"},
+        .excluded_dunders = &.{"__aiter__"},
+    });
+    try std.testing.expectEqual(true, meta.readonly_fields.id);
+    try std.testing.expectEqualStrings("x,y", meta.method_param_names.add);
+    try std.testing.expectEqual(true, meta.class_methods.create);
+}
+
+test "classMeta accepts subset of fields" {
+    // 省略的字段在后端通过 @hasField 探测，等同默认值。
+    const meta = comptime decl.classMeta(.{
+        .readonly_fields = .{ .id = true },
+    });
+    try std.testing.expectEqual(true, meta.readonly_fields.id);
+}
+
+test "classMetaTemplate returns struct with all known fields" {
+    const meta = comptime decl.classMetaTemplate();
+    const T = @TypeOf(meta);
+
+    // 所有 5 个已知字段都必须存在于返回类型中，证明模板覆盖完整。
+    try std.testing.expect(@hasField(T, "readonly_fields"));
+    try std.testing.expect(@hasField(T, "method_param_names"));
+    try std.testing.expect(@hasField(T, "class_methods"));
+    try std.testing.expect(@hasField(T, "handled_dunders"));
+    try std.testing.expect(@hasField(T, "excluded_dunders"));
+
+    // 默认值：空集合 / 空切片。
+    try std.testing.expectEqual(@as(usize, 0), meta.handled_dunders.len);
+    try std.testing.expectEqual(@as(usize, 0), meta.excluded_dunders.len);
+}
+
+test "classMetaTemplate passes classMeta validation" {
+    // 模板返回值必须能通过 classMeta 校验——这要求模板的字段名集合
+    // 与 classMeta 的 known_meta_fields 完全一致，是单一真相源的回归守卫。
+    const meta = comptime decl.classMeta(decl.classMetaTemplate());
+    const T = @TypeOf(meta);
+    try std.testing.expect(@hasField(T, "readonly_fields"));
+    try std.testing.expect(@hasField(T, "method_param_names"));
+    try std.testing.expect(@hasField(T, "class_methods"));
+    try std.testing.expect(@hasField(T, "handled_dunders"));
+    try std.testing.expect(@hasField(T, "excluded_dunders"));
+}
+
+// ---------------------------------------------------------------------------
+// Type conversion extensibility tests
+// ---------------------------------------------------------------------------
+
+test "hasUserToPy detects direct toPy declaration" {
+    const MyType = struct {
+        pub fn toPy(self: @This()) void {
+            _ = self;
+        }
+    };
+    try std.testing.expect(convert.hasUserToPy(MyType));
+}
+
+test "hasUserFromPy detects direct fromPy declaration" {
+    const MyType = struct {
+        pub fn fromPy(obj: anytype) void {
+            _ = obj;
+        }
+    };
+    try std.testing.expect(convert.hasUserFromPy(MyType));
+}
+
+test "hasUserToPy detects PymzConvert trait" {
+    const MyType = struct {
+        pub const PymzConvert = struct {
+            pub fn intoPy(value: @This()) void {
+                _ = value;
+            }
+            pub fn fromPy(obj: anytype) void {
+                _ = obj;
+            }
+        };
+    };
+    try std.testing.expect(convert.hasUserToPy(MyType));
+    try std.testing.expect(convert.hasUserFromPy(MyType));
+}
+
+test "hasUserToPy returns false for types without conversion" {
+    const PlainStruct = struct {};
+    try std.testing.expect(!convert.hasUserToPy(PlainStruct));
+    try std.testing.expect(!convert.hasUserFromPy(PlainStruct));
+}
+
+test "hasUserToPy returns false for primitive types" {
+    try std.testing.expect(!convert.hasUserToPy(i64));
+    try std.testing.expect(!convert.hasUserToPy(f64));
+    try std.testing.expect(!convert.hasUserToPy(bool));
+    try std.testing.expect(!convert.hasUserFromPy(i64));
+    try std.testing.expect(!convert.hasUserFromPy([]const u8));
 }

@@ -1,4 +1,4 @@
-//! Error handling helpers and custom exception support.
+//! 错误处理辅助函数和自定义异常支持。
 
 const std = @import("std");
 const c = @import("python_c");
@@ -8,12 +8,36 @@ const types = @import("types.zig");
 const mem = @import("../../mem.zig");
 const Object = object.Object;
 
-/// Errors that can originate in Zig code and are propagated to Python.
+/// 运行时断言当前线程持有 GIL。
 ///
-/// `PyError` is preserved as a catch-all meaning "a Python exception is already
-/// set".  The richer variants let Zig code surface a native failure without
-/// manually setting a Python exception before returning, and they map to the
-/// corresponding Python exception type in `mapError`.
+/// 在 Debug/ReleaseSafe 构建中触发断言；ReleaseFast 构建中 `std.debug.assert`
+/// 仍会求值条件但移除断言指令，因此 `PyGILState_Check` 调用开销不可避免。
+/// 若需完全零开销的检查，请在调用方用 `comptime std.debug.runtime_safety`
+/// 守卫。
+///
+/// 仅在 `PyGILState_Check` 可用（Python 3.4+）时执行实质检查；旧版本无操作，
+/// 因 `PyThreadState_Get` 在未初始化的解释器上行为不可靠，且 pymz 不在
+/// 解释器未初始化时调用任何 API。
+///
+/// 本函数是 GIL 断言的单一真相源：`cpython.zig` 的 `GIL.assertHeldByCurrentThread`
+/// 与各子模块（object.zig、convert.zig）的关键 API 入口均调用它，
+/// 避免在子模块中重复 `@hasDecl(c, "PyGILState_Check")` 检查、
+/// 也避免子模块反向依赖 `cpython.zig` 形成循环。
+pub fn assertGILHeldByCurrentThread() void {
+    // Guard the entire check with runtime_safety so ReleaseFast builds
+    // completely eliminate the PyGILState_Check() call for zero overhead.
+    if (std.debug.runtime_safety) {
+        if (@hasDecl(c, "PyGILState_Check")) {
+            std.debug.assert(c.PyGILState_Check() != 0);
+        }
+    }
+}
+
+/// Zig 代码中产生并传播到 Python 的错误。
+///
+/// `PyError` 作为通用错误保留，表示"Python 异常已设置"。更丰富的变体使
+/// Zig 代码无需在返回前手动设置 Python 异常即可表达原生失败，并通过
+/// `mapError` 映射到对应的 Python 异常类型。
 pub const Error = error{
     PyError,
     OutOfMemory,
@@ -33,18 +57,16 @@ pub const Error = error{
     ZeroDivisionError,
 };
 
-/// Runtime-neutral public result type alias.
+/// 运行时无关的公共结果类型别名。
 pub inline fn Result(comptime T: type) type {
     return Error!T;
 }
 
-/// Map a Zig error to an appropriate Python exception.
+/// 将 Zig 错误映射到适当的 Python 异常。
 ///
-/// Callers should use this when a Zig function returns a non-`PyError` error and
-/// they want Python to see a meaningful exception type.  If a Python exception is
-/// already set, the existing exception is preserved. The Python exception is
-/// always set before returning, so callers only need to return a failure indicator
-/// to Python.
+/// 调用方应在 Zig 函数返回非 `PyError` 错误时使用此函数，以便 Python 看到
+/// 有意义的异常类型。如果 Python 异常已设置，则保留现有异常。Python 异常
+/// 总是在返回前设置，因此调用方只需向 Python 返回失败指示。
 pub fn mapError(err: anyerror) void {
     if (err == error.PyError) {
         return;
@@ -53,33 +75,27 @@ pub fn mapError(err: anyerror) void {
     switch (err) {
         error.OutOfMemory,
         error.MemoryError,
-        => c.PyErr_SetString(c.PyExc_MemoryError, @ptrCast("out of memory")),
-        error.OverflowError => c.PyErr_SetString(c.PyExc_OverflowError, @ptrCast("integer overflow")),
-        error.InvalidArgument => c.PyErr_SetString(c.PyExc_ValueError, @ptrCast("invalid argument")),
-        error.IndexError => c.PyErr_SetString(c.PyExc_IndexError, @ptrCast("index out of bounds")),
-        error.KeyError => c.PyErr_SetString(c.PyExc_KeyError, @ptrCast("key not found")),
-        error.InvalidUtf8 => c.PyErr_SetString(c.PyExc_UnicodeDecodeError, @ptrCast("invalid UTF-8")),
-        error.SystemError => c.PyErr_SetString(c.PyExc_SystemError, @ptrCast("system error")),
-        error.TypeError => c.PyErr_SetString(c.PyExc_TypeError, @ptrCast("type error")),
-        error.ValueError => c.PyErr_SetString(c.PyExc_ValueError, @ptrCast("value error")),
-        error.AttributeError => c.PyErr_SetString(c.PyExc_AttributeError, @ptrCast("attribute error")),
-        error.RuntimeError => c.PyErr_SetString(c.PyExc_RuntimeError, @ptrCast("runtime error")),
-        error.NotImplementedError => c.PyErr_SetString(c.PyExc_NotImplementedError, @ptrCast("not implemented")),
-        error.BufferError => c.PyErr_SetString(c.PyExc_BufferError, @ptrCast("buffer error")),
-        error.StopIteration => c.PyErr_SetString(c.PyExc_StopIteration, @ptrCast("")),
-        error.ZeroDivisionError => c.PyErr_SetString(c.PyExc_ZeroDivisionError, @ptrCast("division by zero")),
+        => c.PyErr_SetString(c.PyExc_MemoryError, "out of memory"),
+        error.OverflowError => c.PyErr_SetString(c.PyExc_OverflowError, "integer overflow"),
+        error.InvalidArgument => c.PyErr_SetString(c.PyExc_ValueError, "invalid argument"),
+        error.IndexError => c.PyErr_SetString(c.PyExc_IndexError, "index out of bounds"),
+        error.KeyError => c.PyErr_SetString(c.PyExc_KeyError, "key not found"),
+        error.InvalidUtf8 => c.PyErr_SetString(c.PyExc_UnicodeDecodeError, "invalid UTF-8"),
+        error.SystemError => c.PyErr_SetString(c.PyExc_SystemError, "system error"),
+        error.TypeError => c.PyErr_SetString(c.PyExc_TypeError, "type error"),
+        error.ValueError => c.PyErr_SetString(c.PyExc_ValueError, "value error"),
+        error.AttributeError => c.PyErr_SetString(c.PyExc_AttributeError, "attribute error"),
+        error.RuntimeError => c.PyErr_SetString(c.PyExc_RuntimeError, "runtime error"),
+        error.NotImplementedError => c.PyErr_SetString(c.PyExc_NotImplementedError, "not implemented"),
+        error.BufferError => c.PyErr_SetString(c.PyExc_BufferError, "buffer error"),
+        error.StopIteration => c.PyErr_SetString(c.PyExc_StopIteration, ""),
+        error.ZeroDivisionError => c.PyErr_SetString(c.PyExc_ZeroDivisionError, "division by zero"),
         else => {
-            const printed = std.fmt.allocPrint(mem.allocator, "zig error: {s}", .{@errorName(err)}) catch {
-                c.PyErr_SetString(c.PyExc_RuntimeError, @ptrCast("zig function returned an error"));
-                return;
-            };
-            defer mem.allocator.free(printed);
-            const msg = mem.allocator.allocSentinel(u8, printed.len, 0) catch {
-                c.PyErr_SetString(c.PyExc_RuntimeError, @ptrCast("zig function returned an error"));
+            const msg = std.fmt.allocPrintSentinel(mem.allocator, "zig error: {s}", .{@errorName(err)}, 0) catch {
+                c.PyErr_SetString(c.PyExc_RuntimeError, "zig function returned an error");
                 return;
             };
             defer mem.allocator.free(msg);
-            @memcpy(msg, printed);
             c.PyErr_SetString(c.PyExc_RuntimeError, @ptrCast(msg));
         },
     }
@@ -97,14 +113,13 @@ pub inline fn errorPrint() void {
     if (errorOccurred() != null) c.PyErr_Print();
 }
 
-/// Raise a Python exception with a formatted message. The exception class is
-/// a comptime parameter, providing a generic alternative to the per-type
-/// convenience wrappers below.
+/// 抛出带有格式化消息的 Python 异常。异常类为编译期参数，作为下面各类型
+/// 便捷包装器的通用替代。
 pub inline fn raise(comptime exc: ?*c.PyObject, comptime msg: [:0]const u8, args: anytype) void {
     errorFormat(exc, msg, args);
 }
 
-// Per-type convenience wrappers (one-liners forwarding to errorFormat).
+// 各类型的便捷包装器（单行转发到 errorFormat）。
 pub inline fn typeError(comptime msg: [:0]const u8, args: anytype) void {
     errorFormat(c.PyExc_TypeError, msg, args);
 }
@@ -148,21 +163,15 @@ pub inline fn errorFormat(
         c.PyErr_SetString(exc, @ptrCast(format));
         return;
     }
-    const printed = std.fmt.allocPrint(mem.allocator, format, args) catch {
-        c.PyErr_SetString(c.PyExc_MemoryError, @ptrCast("out of memory"));
+    const buf = std.fmt.allocPrintSentinel(mem.allocator, format, args, 0) catch {
+        c.PyErr_SetString(c.PyExc_MemoryError, "out of memory");
         return;
     };
-    defer mem.allocator.free(printed);
-    const buf = mem.allocator.allocSentinel(u8, printed.len, 0) catch {
-        c.PyErr_SetString(c.PyExc_MemoryError, @ptrCast("out of memory"));
-        return;
-    };
-    @memcpy(buf, printed);
     defer mem.allocator.free(buf);
     c.PyErr_SetString(exc, @ptrCast(buf));
 }
-/// Standard Python exception categories that can be used as a base for
-/// `createException`. Mirrors PyOZ's `ExcBase` enum.
+/// 可作为 `createException` 基类的标准 Python 异常类别。对应 PyOZ 的
+/// `ExcBase` 枚举。
 pub const ExceptionBase = enum {
     base_exception,
     exception,
@@ -221,7 +230,7 @@ pub const ExceptionBase = enum {
     unicode_warning,
     user_warning,
 
-    /// Resolve to the corresponding `?*c.PyObject` exception class.
+    /// 解析为对应的 `?*c.PyObject` 异常类。
     pub fn toPyObject(self: ExceptionBase) ?*c.PyObject {
         return switch (self) {
             .base_exception => c.PyExc_BaseException,
@@ -284,87 +293,81 @@ pub const ExceptionBase = enum {
     }
 };
 
-/// A custom Python exception class created via `createException`.
+/// 通过 `createException` 创建的自定义 Python 异常类。
 ///
-/// `exc_type` is a borrowed reference owned by the module that the exception
-/// was registered against. The module keeps the exception class alive for the
-/// interpreter's lifetime, so callers may freely use `exc_type` without
-/// managing its reference count.
+/// `exc_type` 是一个借用引用，由注册该异常的模块持有。模块在解释器生命周期
+/// 内保持异常类存活，因此调用方可自由使用 `exc_type` 而无需管理其引用计数。
 pub const Exception = struct {
     exc_type: *Object,
 
-    /// Raise this exception with a static message. Sets Python error state and
-    /// returns `error.PyError` so callers can `return raise(...)` from a
-    /// `Result(T)` function.
+    /// 使用静态消息抛出此异常。设置 Python 错误状态并返回 `error.PyError`，
+    /// 以便调用方可以从 `Result(T)` 函数中 `return raise(...)`。
     pub inline fn raise(self: *const Exception, msg: [:0]const u8) Error {
         c.PyErr_SetString(@ptrCast(self.exc_type), msg);
         return error.PyError;
     }
 
-    /// Raise this exception with a formatted message.
+    /// 使用格式化消息抛出此异常。
     pub inline fn raiseFormat(self: *const Exception, comptime fmt: []const u8, args: anytype) Error {
-        return errorFormat(@ptrCast(self.exc_type), fmt, args);
+        errorFormat(@ptrCast(self.exc_type), fmt, args);
+        return error.PyError;
     }
 
-    /// Get the underlying Python exception class as `*Object`.
+    /// 获取底层的 Python 异常类作为 `*Object`。
     pub inline fn asObject(self: *const Exception) *Object {
         return self.exc_type;
     }
 };
 
-/// Create a new Python exception class derived from a standard base.
-/// The exception is automatically registered as an attribute of `mod` under
-/// `name`, so users can write `mymodule.MyError("msg")` from Python.
+/// 从标准基类派生创建新的 Python 异常类。
+/// 该异常会自动注册为 `mod` 的属性，名称为 `name`，因此用户可以从 Python
+/// 端编写 `mymodule.MyError("msg")`。
 ///
-/// `PyErr_NewException` is available on both Python 2.7 and Python 3, so the
-/// same code path is used on both versions.
+/// `PyErr_NewException` 在 Python 2.7 和 Python 3 上均可用，因此两个版本
+/// 使用相同的代码路径。
 pub fn createException(
     mod: *types.Module,
     name: [:0]const u8,
     base: ExceptionBase,
     doc: ?[:0]const u8,
 ) Error!Exception {
-    // Build the fully qualified name "modname.name" required by PyErr_NewException.
+    // 构建 `PyErr_NewException` 所需的全限定名 "modname.name"。
     const mod_name_str = mod.getName();
-    const qual_name_noz = std.fmt.allocPrint(mem.allocator, "{s}.{s}", .{ mod_name_str, name }) catch {
-        c.PyErr_SetString(c.PyExc_MemoryError, @ptrCast("out of memory"));
-        return error.PyError;
-    };
-    defer mem.allocator.free(qual_name_noz);
-    // Add sentinel terminator for the C API.
-    const qual_name = mem.allocator.allocSentinel(u8, qual_name_noz.len, 0) catch {
-        c.PyErr_SetString(c.PyExc_MemoryError, @ptrCast("out of memory"));
+    const qual_name = std.fmt.allocPrintSentinel(mem.allocator, "{s}.{s}", .{ mod_name_str, name }, 0) catch {
+        c.PyErr_SetString(c.PyExc_MemoryError, "out of memory");
         return error.PyError;
     };
     defer mem.allocator.free(qual_name);
-    @memcpy(qual_name[0..qual_name_noz.len], qual_name_noz);
 
     const base_obj = base.toPyObject();
-    // `PyErr_NewException` is available on both Python 2.7 and Python 3, so
-    // no version branch is needed. Pass NULL for dict; the docstring (if any)
-    // is set below via the `__doc__` attribute.
+    // `PyErr_NewException` 在 Python 2.7 和 Python 3 上均可用，无需版本分支。
+    // 为 dict 传入 NULL；文档字符串（如果有）通过 `__doc__` 属性设置。
     const exc = c.PyErr_NewException(qual_name.ptr, base_obj, null) orelse {
         return error.PyError;
     };
 
-    // Optionally attach a docstring via the __doc__ attribute (must be a str).
+    // 可选：通过 __doc__ 属性附加文档字符串（必须为 str）。
     if (version.is_py3) if (doc) |d| {
         const doc_obj = object.Str.fromSlice(d) catch null;
         if (doc_obj) |str_obj| {
-            _ = c.PyObject_SetAttrString(exc, "__doc__", @ptrCast(str_obj));
+            // 故意忽略返回值：异常类的 `__doc__` 属性设置失败不影响异常的创建、
+            // 抛出与捕获功能——异常类本身已由 `PyErr_NewException` 成功构造，
+            // `__doc__` 仅是辅助说明。`str_obj` 的新引用在下方 `decref` 释放。
+            if (c.PyObject_SetAttrString(exc, "__doc__", @ptrCast(str_obj)) < 0) {
+                c.PyErr_Clear();
+            }
             str_obj.decref();
         }
     };
 
-    // Register the new exception as a module attribute.
-    // `addObjectRef` does not steal the reference on any Python version:
-    //  - 3.10+ `PyModule_AddObjectRef` increfs internally.
-    //  - <3.10 `PyModule_AddObject` steals the `newref()` produced inside
-    //    `addObjectRef`, leaving the caller's original refcount unchanged.
-    // Either way we still own the new reference returned by
-    // `PyErr_NewException`, so we must decref it here to balance. The module
-    // keeps the exception class alive, so `Exception.exc_type` becomes a
-    // borrowed reference valid for the module's lifetime.
+    // 将新异常注册为模块属性。
+    // `addObjectRef` 在任何 Python 版本上都不会窃取引用：
+    //   - 3.10+ `PyModule_AddObjectRef` 内部 incref。
+    //   - <3.10 `PyModule_AddObject` 窃取 `addObjectRef` 内部产生的 `newref()`，
+    //     使调用方的原始引用计数不变。
+    // 无论哪种方式，我们仍然拥有 `PyErr_NewException` 返回的新引用，
+    // 因此必须在此 decref 以平衡。模块保持异常类存活，因此 `Exception.exc_type`
+    // 成为在模块生命周期内有效的借用引用。
     try mod.addObjectRef(name, @ptrCast(exc));
     object.decrefRaw(exc);
 

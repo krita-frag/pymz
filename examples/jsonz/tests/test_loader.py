@@ -37,7 +37,7 @@ def _write_manifest(package_dir: Path, module: str = "_jsonz", distribution: str
         "modules": [module],
         "module": module,
         "version": "0.1.0",
-        "zig_target": "example",
+        "zig_target": "pymz",
         "runtime": "cpython3",
         "lib_dir": str(package_dir),
         "distribution": distribution,

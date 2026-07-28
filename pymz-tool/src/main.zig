@@ -1,13 +1,11 @@
-//! pymz build scaffold - reusable helpers for building Python extensions
-//! with Zig across Python versions and target platforms.
+//! pymz 构建脚手架 - 跨 Python 版本和目标平台构建 Python 扩展的可复用辅助工具。
 //!
-//! Import this file from a project's `build.zig` to get:
-//!   * Python configuration detection (python-config / sysconfig)
-//!   * Automatic Python-extension file naming (cpython-XY-platform.so, etc.)
-//!   * Cross-platform linking rules (Unix runtime-link, Windows import-lib)
+//! 从项目的 `build.zig` 中导入此文件以获取：
+//!   * Python 配置检测（python-config / sysconfig）
+//!   * 自动的 Python 扩展文件命名（cpython-XY-platform.so 等）
+//!   * 跨平台链接规则（Unix 运行时链接、Windows 导入库）
 //!
-//! Implementation details live in the sibling modules; this file is the public
-//! entry point and orchestrates `buildProject`.
+//! 实现细节位于同级模块中；此文件是公共入口点，负责编排 `buildProject`。
 
 const std = @import("std");
 const python_config = @import("python_config.zig");
@@ -39,11 +37,9 @@ pub const HookContext = extension.HookContext;
 pub const BuildHooks = extension.BuildHooks;
 pub const PythonOverrides = python_config.PythonOverrides;
 
-/// Errors surfaced to the caller of `buildProject`. User-actionable option
-/// problems are distinct from missing-dependency errors so callers can present
-/// a helpful message instead of a panic stack. `OutOfMemory` is included
-/// because the build-graph allocations (e.g. the cross-target artifact slots)
-/// route through the build allocator.
+/// 暴露给 `buildProject` 调用者的错误类型。
+/// 用户可操作的选项问题与缺少依赖的错误区分开，以便调用者可以提供有帮助的消息而非 panic 堆栈。
+/// `OutOfMemory` 被包含在内，因为构建图分配（例如交叉目标产物槽）通过构建分配器进行。
 pub const BuildProjectError = error{
     InvalidRuntime,
     CustomBackendRequiresExplicitRuntime,
@@ -56,38 +52,31 @@ pub const BuildProjectError = error{
 
 pub const ProjectOptions = struct {
     module_name: []const u8,
-    /// Root source file for the extension module. **Required** -- the Zig
-    /// build system (build.zig) is the canonical place for Zig source layout
-    /// configuration, not pyproject.toml.
+    /// 扩展模块的根源文件。**必需**——Zig 构建系统（build.zig）是配置 Zig 源文件布局的规范位置，而非 pyproject.toml。
     root_source_file: std.Build.LazyPath,
-    /// Optional default step name; defaults to `module_name`.
+    /// 可选的默认步骤名称；默认为 `module_name`。
     step_name: ?[]const u8 = null,
-    /// Optional default multi step name; defaults to `{module_name}-multi`.
+    /// 可选的默认多步骤名称；默认为 `{module_name}-multi`。
     multi_step_name: ?[]const u8 = null,
-    /// Optional hooks for custom linking, C sources, or install steps.
+    /// 可选的自定义链接、C 源文件或安装步骤的钩子。
     hooks: BuildHooks = .{},
 
-    /// Path to the `pymz` package root source file. Defaults to the
-    /// conventional `pymz/src/pymz.zig` inside the `pymz` dependency.
+    /// `pymz` 包根源文件的路径。默认为 `pymz` 依赖中的 `pymz/src/pymz.zig`。
     pymz_root_file: ?std.Build.LazyPath = null,
-    /// Path to the backend contract file. Defaults to `pymz/src/contract.zig`.
+    /// 后端契约文件的路径。默认为 `pymz/src/contract.zig`。
     pymz_contract_file: ?std.Build.LazyPath = null,
-    /// Path to the default backend implementation. Defaults to
-    /// `pymz/src/backend.zig`.
+    /// 默认后端实现的路径。默认为 `pymz/src/backend.zig`。
     pymz_backend_file: ?std.Build.LazyPath = null,
-    /// Path to the C header used by the CPython backend. Defaults to
-    /// `pymz/src/runtime/cpython/python_c.h`.
+    /// CPython 后端使用的 C 头文件路径。默认为 `pymz/src/runtime/cpython/python_c.h`。
     pymz_python_c_header: ?std.Build.LazyPath = null,
-    /// Path to the CPython compatibility include directory. Defaults to
-    /// `pymz/src/runtime/cpython`.
+    /// CPython 兼容性包含目录的路径。默认为 `pymz/src/runtime/cpython`。
     pymz_cpython_include_dir: ?std.Build.LazyPath = null,
 };
 
-/// Build a standalone extension project with multi-version smoke-test steps.
+/// 构建独立的扩展项目，附带多版本烟雾测试步骤。
 ///
-/// Returns the primary (host-target) extension artifact, or `null` when the
-/// build is only answering a metadata query (e.g. `--help` or
-/// `--list-steps`) and no artifact was produced.
+/// 返回主要的（主机目标）扩展产物，当构建仅响应元数据查询（例如 `--help` 或 `--list-steps`）
+/// 且未产生任何产物时返回 `null`。
 pub fn buildProject(
     b: *std.Build,
     options: ProjectOptions,
@@ -110,8 +99,7 @@ pub fn buildProject(
     );
     const pymz_dep = b.lazyDependency("pymz", .{}) orelse return error.MissingPymzDependency;
 
-    // Resolve pymz file paths. Callers can override any of these to decouple
-    // their project from the default pymz package layout.
+    // 解析 pymz 文件路径。调用者可以覆盖其中任何一个，以将项目与默认的 pymz 包布局解耦。
     const pymz_root_file = options.pymz_root_file orelse pymz_dep.path("src/pymz.zig");
     const pymz_contract_file = options.pymz_contract_file orelse pymz_dep.path("src/contract.zig");
     const pymz_backend_file = options.pymz_backend_file orelse pymz_dep.path("src/backend.zig");
@@ -119,7 +107,7 @@ pub fn buildProject(
     const pymz_cpython_include_dir = options.pymz_cpython_include_dir orelse pymz_dep.path("src/runtime/cpython");
     const pymz_tool_dep = b.lazyDependency("pymz-tool", .{}) orelse return error.MissingPymzToolDependency;
     const pymz_core_module = b.createModule(.{
-        .root_source_file = pymz_tool_dep.path("src/core/main.zig"),
+        .root_source_file = pymz_tool_dep.path("src/main.zig"),
     });
 
     const python_version = b.option(
@@ -176,12 +164,10 @@ pub fn buildProject(
         return null;
     }
 
-    // Build-option-driven Python configuration overrides. ``build.zig``
-    // authors set them directly via ``-D`` options; when a field is non-null
-    // it takes precedence over environment variables and python-config.
-    // `fillFromEnv` picks up ``PYMZ_PYTHON_*`` env vars for any field not
-    // pinned on the command line, realising the documented
-    // ``-D option > env var > python-config`` precedence.
+    // 构建选项驱动的 Python 配置覆盖。`build.zig` 作者通过 `-D` 选项直接设置它们；
+    // 当字段非 null 时，它优先于环境变量和 python-config。
+    // `fillFromEnv` 为任何未在命令行上固定的字段拾取 `PYMZ_PYTHON_*` 环境变量，
+    // 实现文档中记录的 `-D 选项 > 环境变量 > python-config` 优先级。
     const python_overrides: PythonOverrides = blk: {
         const from_options: PythonOverrides = .{
             .config = b.option([]const u8, "pymz-python-config", "Path to python-config script"),
@@ -191,7 +177,7 @@ pub fn buildProject(
             .ext_suffix = b.option([]const u8, "pymz-python-ext-suffix", "Python extension suffix (cross-compile)"),
             .version = b.option([]const u8, "pymz-python-version", "Python version for synthesised config (e.g. 3.12)"),
         };
-        break :blk from_options.fillFromEnv();
+        break :blk from_options.fillFromEnv(b);
     };
 
     const windows_import_lib: ?std.Build.LazyPath = blk: {
@@ -202,11 +188,11 @@ pub fn buildProject(
         );
         if (import_lib_opt) |raw| break :blk b.path(raw);
 
-        // Fallback: read the ``PYMZ_WINDOWS_IMPORT_LIB`` env var when no
-        // ``-Dpymz-windows-import-lib`` build option is supplied.
-        if (std.c.getenv("PYMZ_WINDOWS_IMPORT_LIB")) |env_value| {
+        // 回退：当未提供 `-Dpymz-windows-import-lib` 构建选项时，读取 `PYMZ_WINDOWS_IMPORT_LIB` 环境变量。
+        // 通过 `b.graph.environ_map` 读取，避免 `std.c.getenv` 在 Windows 构建脚本上的 libc 依赖。
+        if (b.graph.environ_map.get("PYMZ_WINDOWS_IMPORT_LIB")) |env_value| {
             std.log.warn("PYMZ_WINDOWS_IMPORT_LIB env var read as fallback; prefer -Dpymz-windows-import-lib", .{});
-            break :blk b.path(std.mem.span(env_value));
+            break :blk b.path(env_value);
         }
         break :blk null;
     };
@@ -241,9 +227,8 @@ pub fn buildProject(
 
     const project_source = options.root_source_file;
 
-    // All inputs that stay constant across the host build and every cross
-    // target are captured once in `ext_ctx` so the per-target build helper
-    // only needs the bits that actually vary: target, Python config, runtime.
+    // 在主机构建和每个交叉目标中保持不变的输入一次性捕获到 `ext_ctx` 中，
+    // 以便每个目标构建辅助函数只需要实际变化的参数：目标、Python 配置、运行环境。
     const use_cpython_backend = backend_source_raw == null;
     const ext_ctx: ExtensionBuildContext = .{
         .optimize = optimize,
@@ -267,12 +252,11 @@ pub fn buildProject(
         primary_py,
         backend_runtime,
     ) catch return error.InvalidOption;
-    // Install the host artifact into ``<prefix>/lib`` under the exact Python
-    // extension filename (e.g. ``_jsonz.cpython-314-darwin.so``). ``installArtifact``
-    // is not used because the library ``name`` carries the full ext suffix, which
-    // Zig would mangle into ``lib<name>.dylib``; installing the emitted bin with
-    // the artifact's ``name`` as the destination preserves the suffix Python's
-    // import machinery and ``collect_artifacts`` expect.
+    // 将主机产物安装到 `<prefix>/lib` 下，使用精确的 Python 扩展文件名
+    // （例如 `_jsonz.cpython-314-darwin.so`）。不使用 `installArtifact`，
+    // 因为库的 `name` 携带完整的扩展后缀，Zig 会将其变形为 `lib<name>.dylib`；
+    // 使用产物的 `name` 作为目标名称安装发出的二进制文件，
+    // 保留 Python 导入机制和 `collect_artifacts` 期望的后缀。
     const install_host = b.addInstallFileWithDir(
         project_artifact.getEmittedBin(),
         .lib,
@@ -281,8 +265,8 @@ pub fn buildProject(
     build_step.dependOn(&install_host.step);
     build_step.dependOn(&project_artifact.step);
 
-    // Pre-build the host-OS cross artifacts once so the multi-step can depend
-    // on them without rebuilding when iterating Python versions.
+    // 预先构建主机 OS 的交叉产物一次，以便多步骤可以依赖它们，
+    // 在迭代 Python 版本时无需重新构建。
     var primary_cross_artifacts = try b.allocator.alloc(?*std.Build.Step.Compile, cross_targets.len);
     @memset(primary_cross_artifacts, null);
 
@@ -312,8 +296,8 @@ pub fn buildProject(
     var skipped_count: usize = 0;
 
     if (explicit_versions) |versions| {
-        // Per-version matrix: for each Python version, build the native
-        // artifact plus every cross target whose OS matches the host.
+        // 按版本矩阵：对于每个 Python 版本，构建本地产物以及每个
+        // OS 与主机匹配的交叉目标。
         for (versions) |version| {
             const config = resolvePythonConfigMaybe(b, version, python_overrides) orelse {
                 std.log.warn("skip python {s}: exact python-config not found", .{version});
@@ -365,30 +349,20 @@ pub fn buildProject(
             ) catch 0;
         }
     } else {
-        // No explicit versions: the multi-step is the host build plus the
-        // pre-built host-OS cross artifacts.
+        // 没有显式版本：多步骤就是主机构建加上
+        // 预先构建的主机 OS 交叉产物。
         multi_step.dependOn(build_step);
         built_count += 1;
         for (cross_targets, 0..) |cross_target_config, index| {
             if (skip_cross) break;
             const triple = cross_target_config.triple;
             const cross_target = resolveCrossTarget(b, triple) catch return error.InvalidOption;
-            if (primary_py.major < 3) {
-                std.log.warn(
-                    "skip target {s} for default host Python: Python 2 import loaders do not support tagged multi-platform suffixes",
-                    .{triple},
-                );
+            if (crossTargetShouldSkip(primary_py, cross_target, triple, "default host Python")) {
                 skipped_count += 1;
-            } else if (cross.shouldSkipCrossTarget(cross_target)) {
-                std.log.warn(
-                    "skip target {s} for default host Python: cross-linking requires a target Python toolchain",
-                    .{triple},
-                );
-                skipped_count += 1;
-            } else {
-                multi_step.dependOn(&primary_cross_artifacts[index].?.step);
-                built_count += 1;
+                continue;
             }
+            multi_step.dependOn(&primary_cross_artifacts[index].?.step);
+            built_count += 1;
         }
     }
     std.log.info("{s} plan: {d} build artifact(s), {d} skipped variant(s)", .{
@@ -400,12 +374,11 @@ pub fn buildProject(
     return project_artifact;
 }
 
-/// Resolve the backend runtime for a build cell.
+/// 解析构建单元格的后端运行环境。
 ///
-/// When no custom backend source is supplied, the runtime is auto-resolved
-/// from the Python major version (or the explicit `requested_runtime`).
-/// A custom backend source requires an explicit runtime, because auto
-/// resolution is tied to CPython's `python-config` discovery.
+/// 当未提供自定义后端源时，运行环境从 Python 主版本号自动解析
+///（或显式的 `requested_runtime`）。
+/// 自定义后端源需要显式指定运行环境，因为自动解析依赖于 CPython 的 `python-config` 发现。
 fn resolveBackendRuntime(
     requested_runtime_raw: []const u8,
     requested_runtime: ?Runtime,
@@ -420,12 +393,40 @@ fn resolveBackendRuntime(
     return error.CustomBackendRequiresExplicitRuntime;
 }
 
-/// Wire cross-target artifacts for one Python version onto `multi_step`.
+/// 检查给定 Python 配置的交叉编译目标是否应跳过。
+/// 记录原因并在目标无法构建时返回 `true`；
+/// 调用者应继续时返回 `false`。
 ///
-/// Returns the number of cross artifacts actually built. Skip policy:
-/// Python 2 cannot emit tagged multi-platform suffixes, and cross-linking to
-/// a non-host OS requires a target Python toolchain the host does not have.
-/// Both cases are logged and counted as skipped rather than failing the build.
+/// 由 `wireCrossTargetsForVersion`（按版本矩阵）和默认主机 Python 的 else 分支共享，
+/// 使跳过策略保持在同一位置。
+fn crossTargetShouldSkip(
+    py: PythonConfig,
+    cross_target: std.Build.ResolvedTarget,
+    triple: []const u8,
+    context_label: []const u8,
+) bool {
+    if (py.major < 3) {
+        std.log.warn(
+            "skip target {s} for {s}: Python 2 import loaders do not support tagged multi-platform suffixes",
+            .{ triple, context_label },
+        );
+        return true;
+    }
+    if (cross.shouldSkipCrossTarget(cross_target)) {
+        std.log.warn(
+            "skip target {s} for {s}: cross-linking requires a target Python toolchain",
+            .{ triple, context_label },
+        );
+        return true;
+    }
+    return false;
+}
+
+/// 为一个 Python 版本连接交叉目标产物到 `multi_step`。
+///
+/// 返回实际构建的交叉产物数量。跳过策略：
+/// Python 2 无法发出带标签的多平台后缀，且交叉链接到非主机 OS 需要主机没有的目标 Python 工具链。
+/// 两种情况均被记录并计为跳过，而非使构建失败。
 fn wireCrossTargetsForVersion(
     b: *std.Build,
     ext_ctx: ExtensionBuildContext,
@@ -442,47 +443,36 @@ fn wireCrossTargetsForVersion(
         if (skip_cross) break;
         const triple = cross_target_config.triple;
         const cross_target = try resolveCrossTarget(b, triple);
-        if (py.major < 3) {
-            std.log.warn(
-                "skip target {s} for python {s}: Python 2 import loaders do not support tagged multi-platform suffixes",
-                .{ triple, version },
-            );
+        const context = b.fmt("python {s}", .{version});
+        if (crossTargetShouldSkip(py, cross_target, triple, context)) {
             skipped_count.* += 1;
-        } else if (cross.shouldSkipCrossTarget(cross_target)) {
-            std.log.warn(
-                "skip target {s} for python {s}: cross-linking requires a target Python toolchain",
-                .{ triple, version },
-            );
-            skipped_count.* += 1;
-        } else {
-            const cross_artifact = try buildExtensionArtifact(
-                b,
-                ext_ctx,
-                cross_target,
-                py,
-                runtime,
-            );
-            multi_step.dependOn(&cross_artifact.step);
-            built += 1;
+            continue;
         }
+        const cross_artifact = try buildExtensionArtifact(
+            b,
+            ext_ctx,
+            cross_target,
+            py,
+            runtime,
+        );
+        multi_step.dependOn(&cross_artifact.step);
+        built += 1;
     }
     return built;
 }
 
-/// Shared inputs for building a Python extension artifact across the host
-/// target and every cross-target variant in a single `buildProject` call.
+/// 在单个 `buildProject` 调用中，主机目标和每个交叉目标变体构建 Python 扩展产物的共享输入。
 ///
-/// Capturing these once lets `buildExtensionArtifact` vary only the pieces
-/// that actually differ per artifact: `target`, `py`, and `runtime`.
+/// 一次性捕获这些输入，使 `buildExtensionArtifact` 仅需变化每个产物实际不同的部分：
+/// `target`、`py` 和 `runtime`。
 const ExtensionBuildContext = struct {
     optimize: std.builtin.OptimizeMode,
     pymz_core_module: *std.Build.Module,
     pymz_contract_file: std.Build.LazyPath,
     pymz_root_file: std.Build.LazyPath,
     backend_source_file: std.Build.LazyPath,
-    /// Pre-resolved optional CPython backend inputs: both are non-null when
-    /// the default backend is used, and both null when a custom backend
-    /// source overrides them. `use_cpython_backend` is derived from this.
+    /// 预解析的可选 CPython 后端输入：使用默认后端时两者均非 null，
+    /// 自定义后端源覆盖时两者均为 null。`use_cpython_backend` 由此派生。
     backend_python_c_header: ?std.Build.LazyPath,
     backend_cpython_include_dir: ?std.Build.LazyPath,
     pymz_dep: *std.Build.Dependency,
@@ -492,14 +482,12 @@ const ExtensionBuildContext = struct {
     hooks: BuildHooks,
 };
 
-/// Build a single Python extension artifact (backend module + pymz module +
-/// extension shared library) for the given target, Python config, and
-/// runtime.
+/// 为给定目标、Python 配置和运行环境构建单个 Python 扩展产物
+///（后端模块 + pymz 模块 + 扩展共享库）。
 ///
-/// This wraps the `createBackendModule` -> `createPymzModule` ->
-/// `addPythonExtension` sequence for the host build and every cross-target
-/// variant. The caller wires the returned artifact onto the appropriate build
-/// step (`build_step`, `multi_step`, or a per-target `cross_step`).
+/// 封装 `createBackendModule` -> `createPymzModule` -> `addPythonExtension` 序列，
+/// 用于主机构建和每个交叉目标变体。
+/// 调用者将返回的产物连接到适当的构建步骤（`build_step`、`multi_step` 或每个目标的 `cross_step`）。
 fn buildExtensionArtifact(
     b: *std.Build,
     ctx: ExtensionBuildContext,
@@ -508,10 +496,8 @@ fn buildExtensionArtifact(
     runtime: Runtime,
 ) !*std.Build.Step.Compile {
     const use_cpython_backend = ctx.backend_python_c_header != null;
-    // The contract module (`contract.zig`) is created once and shared by both
-    // the backend module and the pymz module so the file is owned by exactly
-    // one module. `contract.zig` only imports `std`, so it needs no target or
-    // Python configuration.
+    // 契约模块（`contract.zig`）创建一次，由后端模块和 pymz 模块共享，
+    // 使文件恰好被一个模块拥有。`contract.zig` 仅导入 `std`，因此不需要目标或 Python 配置。
     const contract_module = b.createModule(.{
         .root_source_file = ctx.pymz_contract_file,
     });
@@ -550,10 +536,9 @@ fn buildExtensionArtifact(
     });
 }
 
-/// Parse a cross-compilation triple into a `ResolvedTarget`.
+/// 将交叉编译三元组解析为 `ResolvedTarget`。
 ///
-/// Shared by every cross-target loop so the parse call site stays consistent
-/// and the loops focus on skip policy and step wiring.
+/// 每个交叉目标循环共享此函数，使解析调用点保持一致，且循环专注于跳过策略和步骤连接。
 fn resolveCrossTarget(
     b: *std.Build,
     triple: []const u8,

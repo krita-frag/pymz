@@ -1,4 +1,4 @@
-//! Shared helpers for declarative Python export descriptors.
+//! 声明式 Python 导出描述符的共享辅助函数。
 
 const std = @import("std");
 const convert = @import("../convert.zig");
@@ -23,17 +23,15 @@ pub const FnMode = enum {
 
 pub const FunctionOptions = struct {
     doc: ?[]const u8 = null,
-    /// Comma-separated positional parameter names as a single string.
+    /// 逗号分隔的位置参数名，以单个字符串形式提供。
     signature: ?[]const u8 = null,
-    /// Array of parameter names. Takes precedence over `signature` when both are provided.
+    /// 参数名数组。当同时提供时，优先于 `signature`。
     param_names: ?[]const []const u8 = null,
-    /// Platform filter. `null` = include on all platforms; `true` = limited ABI only;
-    /// `false` = full ABI only.
+    /// 平台过滤器。`null` = 包含所有平台；`true` = 仅限 limited ABI；`false` = 仅限完整 ABI。
     limited: ?bool = null,
 };
 
-/// Join an array of parameter names into a comma-separated string used by the
-/// signature pipeline. Evaluated at comptime.
+/// 将参数名数组拼接为逗号分隔的字符串，供签名流水线使用。在编译期求值。
 pub fn joinParamNames(comptime names: []const []const u8) []const u8 {
     comptime {
         var result: []const u8 = "";
@@ -45,8 +43,8 @@ pub fn joinParamNames(comptime names: []const []const u8) []const u8 {
     }
 }
 
-/// Resolve the effective comma-separated parameter names from function options.
-/// Prefers the `param_names` array; falls back to the `signature` string.
+/// 从函数选项中解析有效的逗号分隔参数名。
+/// 优先使用 `param_names` 数组；回退到 `signature` 字符串。
 pub fn resolveParamNames(comptime opts: FunctionOptions) ?[]const u8 {
     if (opts.param_names) |names| {
         return joinParamNames(names);

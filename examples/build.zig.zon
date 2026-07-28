@@ -2,13 +2,15 @@
     .name = .examples,
     .version = "0.1.0",
     .fingerprint = 0x7bd0ad45f668238b,
-    .minimum_zig_version = "0.16.0-dev.2979+e93834410",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .jsonz = .{ .path = "jsonz" },
+        .showcase = .{ .path = "showcase" },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "jsonz",
+        "showcase",
     },
 }

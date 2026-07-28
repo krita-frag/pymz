@@ -1,32 +1,29 @@
-//! Build-time platform gating for the CPython runtime.
+//! CPython 运行时的构建期平台门控。
 //!
-//! `is_limited_api` is a *build-time selection* (whether pymz was configured
-//! for the CPython stable ABI), not a C-header property. It is delivered
-//! through the `pymz_options` build-options module so this file stays light:
-//! it imports neither `python_c` (translated C headers) nor any file outside
-//! the `pymz_backend` module tree. Keeping it light lets the declarative
-//! descriptors and the version module reach `is_limited_api` /
-//! `isActiveForPlatform` without a cross-module file import that would create
-//! a "file exists in two modules" conflict under Zig 0.16.
+//! `is_limited_api` 是*构建期选择*（pymz 是否配置为 CPython 稳定 ABI），
+//! 而非 C 头文件属性。它通过 `pymz_options` 构建选项模块传递，使此文件保
+//! 持轻量：既不导入 `python_c`（翻译后的 C 头文件），也不导入 `pymz_backend`
+//! 模块树之外的任何文件。保持轻量使得声明式描述符和版本模块可以访问
+//! `is_limited_api` / `isActiveForPlatform`，而无需跨模块文件导入——在
+//! Zig 0.16 下，跨模块导入会导致"文件存在于两个模块中"的冲突。
 //!
-//! The public `pymz.platform` namespace (in the `pymz` module) still exports
-//! `is_limited()` / `is_limited_api` for end users; it derives the value from
-//! `backendSpec().capabilities.stable_abi` via the backend module. This file
-//! is the path used *inside* the runtime.
+//! 公共 `pymz.platform` 命名空间（在 `pymz` 模块中）仍然为最终用户导出
+//! `is_limited()` / `is_limited_api`；它通过后端模块从
+//! `backendSpec().capabilities.stable_abi` 派生该值。此文件是运行时代码
+//! *内部*使用的路径。
 
 const options = @import("pymz_options");
 
-/// True when the selected runtime is the CPython stable ABI (limited API).
-/// Driven by the build option so the value is a comptime constant everywhere
-/// the runtime is compiled, with no runtime backends or C headers required.
+/// 当所选运行时为 CPython 稳定 ABI（limited API）时为真。
+/// 由构建选项驱动，因此该值在编译运行时的所有地方都是编译期常量，
+/// 无需运行时后端或 C 头文件。
 pub const is_limited_api: bool = options.is_limited_api;
 
-/// Returns true when a declaration with the given `limited` filter should be
-/// active on the current platform.
+/// 当具有给定 `limited` 过滤器的声明应在当前平台上激活时返回真。
 ///
-/// `null` means "active on all platforms"; `true` means "limited ABI only";
-/// `false` means "full ABI only". This is the single implementation used by
-/// all declarative descriptors (class, function, constant, exception).
+/// `null` 表示"在所有平台上激活"；`true` 表示"仅限 limited ABI"；
+/// `false` 表示"仅限完整 ABI"。这是所有声明式描述符（class、function、
+/// constant、exception）使用的统一实现。
 pub fn isActiveForPlatform(comptime limited: ?bool) bool {
     if (limited) |value| {
         return value == is_limited_api;

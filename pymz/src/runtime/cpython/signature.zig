@@ -1,38 +1,37 @@
-//! Build `__text_signature__` strings (ml_doc) for Python-callable wrappers.
+//! 为 Python 可调用包装器构建 `__text_signature__` 字符串（ml_doc）。
 //!
-//! CPython parses signatures from `ml_doc` using the Argument Clinic format:
+//! CPython 使用 Argument Clinic 格式从 `ml_doc` 解析签名：
 //!   `"funcname($module, arg0, arg1, /)\n--\n\nDocstring text"`
-//! The signature portion becomes `__text_signature__` and is used by `help()`
-//! and `inspect.signature()`.
+//! 签名部分成为 `__text_signature__`，被 `help()` 和 `inspect.signature()` 使用。
 
 const std = @import("std");
 
-/// Method kind for text signature generation.
-/// Determines the hidden parameter prefix that CPython strips from signatures.
+/// 文本签名生成的方法类型。
+/// 决定 CPython 从签名中剥离的隐藏参数前缀。
 pub const MethodKind = enum {
-    /// Module-level function: hidden `$module` parameter.
+    /// 模块级函数：隐藏 `$module` 参数。
     module_func,
-    /// Instance method: hidden `$self` parameter.
+    /// 实例方法：隐藏 `$self` 参数。
     instance_method,
-    /// Static method: no hidden parameter.
+    /// 静态方法：无隐藏参数。
     static_method,
-    /// Class method: hidden `$type` parameter.
+    /// 类方法：隐藏 `$type` 参数。
     class_method,
 };
 
-/// How to render parameters in the signature.
+/// 如何渲染签名中的参数。
 pub const KwargsMode = enum {
-    /// Plain positional: `funcname($module, arg0, arg1, /)`.
+    /// 纯位置参数：`funcname($module, arg0, arg1, /)`。
     positional,
-    /// Named kwargs from an `Args(T)` struct: `funcname($module, /, a, b=None)`.
+    /// 来自 `Args(T)` 结构体的命名 kwargs：`funcname($module, /, a, b=None)`。
     args_struct,
-    /// Mixed positional/keyword: `funcname($module, a, b)`.
+    /// 混合位置/关键字：`funcname($module, a, b)`。
     mixed,
-    /// Fully variadic: `funcname($module, *args, **kwargs)`.
+    /// 完全可变参数：`funcname($module, *args, **kwargs)`。
     varargs,
 };
 
-/// Build an `ml_doc` string with an embedded `__text_signature__`.
+/// 构建带有嵌入 `__text_signature__` 的 `ml_doc` 字符串。
 pub fn buildMlDoc(
     comptime name: []const u8,
     comptime Fn: type,
@@ -42,8 +41,8 @@ pub fn buildMlDoc(
     return buildMlDocWithOptions(name, Fn, kind, .positional, doc, null);
 }
 
-/// Full-featured `ml_doc` builder with explicit kwargs mode and optional
-/// parameter names override (comma-separated, matching parameter order).
+/// 功能完整的 `ml_doc` 构建器，支持显式 kwargs 模式和可选的参数名
+/// 覆盖（逗号分隔，与参数顺序匹配）。
 pub fn buildMlDocWithOptions(
     comptime name: []const u8,
     comptime Fn: type,
@@ -120,7 +119,7 @@ pub fn buildMlDocWithOptions(
                     }
                 }
 
-                // Only `.positional` marks parameters positional-only (`", /"`).
+                // 只有 `.positional` 将参数标记为仅位置参数（`", /"`）。
                 if (kwargs_mode == .positional and has_any) {
                     result = result ++ ", /";
                 }
@@ -143,7 +142,7 @@ pub fn buildMlDocWithOptions(
     }
 }
 
-/// Extract the Nth parameter name from a comma-separated string.
+/// 从逗号分隔的字符串中提取第 N 个参数名。
 pub fn getParamName(comptime names_str: []const u8, comptime idx: usize) []const u8 {
     comptime {
         var current_idx: usize = 0;

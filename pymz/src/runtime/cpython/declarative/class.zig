@@ -1,4 +1,4 @@
-//! Class export descriptors.
+//! 类导出描述符。
 
 const common = @import("common.zig");
 const class_mod = @import("../class/class_builder.zig");
@@ -9,8 +9,7 @@ pub const ExportKind = common.ExportKind;
 
 pub const ClassOptions = struct {
     doc: ?[:0]const u8 = null,
-    /// Platform filter. `null` = include on all platforms; `true` = limited ABI only;
-    /// `false` = full ABI only.
+    /// 平台过滤器。`null` = 包含所有平台；`true` = 仅限 limited ABI；`false` = 仅限完整 ABI。
     limited: ?bool = null,
 };
 
@@ -35,13 +34,12 @@ pub fn class(
     return ClassDescriptor(T, extractClassOptions(doc_or_options));
 }
 
-/// Declare a Zig struct as a Python class with an explicit name and a base
-/// class. Unlike `class`, the name is fixed at declaration time (not derived
-/// from the module field name), so the descriptor carries `auto_name = false`
-/// and `classdefWithName`/`readyWithName` build the type from the explicit
-/// name. The descriptor exposes the same surface (`export_kind`, `is_active`,
-/// `classdefWithName`, `readyWithName`) as `ClassDescriptor` so the module
-/// builder treats both uniformly.
+/// 将 Zig struct 声明为具有显式名称和基类的 Python 类。
+/// 与 `class` 不同，名称在声明时固定（并非从模块字段名派生），
+/// 因此描述符携带 `auto_name = false`，
+/// 且 `classdefWithName`/`readyWithName` 从显式名称构建类型。
+/// 描述符暴露与 `ClassDescriptor` 相同的接口（`export_kind`、`is_active`、
+/// `classdefWithName`、`readyWithName`），使模块构建器统一对待两者。
 pub fn classWithBase(
     comptime class_name: [:0]const u8,
     comptime T: type,
@@ -93,8 +91,7 @@ fn ClassWithBaseDescriptor(
         pub const limited = opts.limited;
         pub const is_active = limiter.isActiveForPlatform(opts.limited);
 
-        // The class name is fixed by the caller, so the runtime type does not
-        // depend on the module field name passed to `*WithName`.
+        // 类名由调用方固定，因此运行时类型不依赖于传递给 `*WithName` 的模块字段名。
         fn Runtime() type {
             return class_mod.generateClass(class_name, Impl, base, doc);
         }

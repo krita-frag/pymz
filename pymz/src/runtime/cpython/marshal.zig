@@ -1,20 +1,19 @@
-//! Argument marshalling for pymz function/method wrappers.
+//! pymz 函数/方法包装器的参数编组。
 //!
-//! This module owns the argument-extraction and return-value pipeline that
-//! sits between a Python `PyMethodDef` callback and the user's Zig function:
+//! 本模块负责位于 Python `PyMethodDef` 回调与用户 Zig 函数之间的参数提取
+//! 和返回值管道：
 //!
-//!   - `extractPositionalArg` / `convertField` / `validateKeywordNames` pull
-//!     arguments out of Python tuples/dicts and convert them via `convert`.
-//!   - `releaseArgsTuple` releases partially-converted arguments when a later
-//!     argument fails or the wrapped function returns.
-//!   - `handleReturn` converts a Zig return value (or error) into a
-//!     `*c.PyObject` suitable for returning from a `PyMethodDef` callback.
+//!   - `extractPositionalArg` / `convertField` / `validateKeywordNames` 从
+//!     Python 元组/字典中提取参数，并通过 `convert` 进行转换。
+//!   - `releaseArgsTuple` 在后续参数失败或包装函数返回时释放已部分转换的
+//!     参数。
+//!   - `handleReturn` 将 Zig 返回值（或错误）转换为适合从 `PyMethodDef`
+//!     回调返回的 `*c.PyObject`。
 //!
-//! The conversion primitives themselves (`toPy`, `fromPy`, `releaseValue`,
-//! `pyTypeName`) live in `convert.zig`; this module imports them rather than
-//! duplicating the conversion logic. The dependency is one-way
-//! (`marshal` -> `convert`): `convert.zig` does not import this module, so
-//! there is no import cycle and the two responsibilities stay separable.
+//! 转换原语本身（`toPy`、`fromPy`、`releaseValue`、`pyTypeName`）位于
+//! `convert.zig` 中；本模块导入它们而非重复转换逻辑。依赖关系是单向的
+//!（`marshal` -> `convert`）：`convert.zig` 不导入本模块，因此不存在
+//! 导入循环，两个职责保持可分离。
 
 const std = @import("std");
 const c = @import("python_c");
@@ -23,16 +22,15 @@ const object = @import("object.zig");
 const types = @import("types.zig");
 const traits = @import("traits.zig");
 const convert = @import("convert.zig");
+const mem = @import("../../mem.zig");
 
 const Object = object.Object;
 
-/// Release the first `count` converted arguments in a `std.meta.ArgsTuple(Fn)`.
+/// 释放 `std.meta.ArgsTuple(Fn)` 中前 `count` 个已转换的参数。
 ///
-/// Used by every `pyfn_*` / method wrapper to clean up partially-converted
-/// argument tuples when a later argument fails to convert or after the wrapped
-/// function returns. `skip` is the number of leading arguments that are not
-/// Python-converted (e.g. `self` for instance methods, `cls` for class
-/// methods); those slots are never touched.
+/// 每个 `pyfn_*` / 方法包装器都使用此函数，在后续参数转换失败或包装函数
+/// 返回后清理已部分转换的参数元组。`skip` 是开头的非 Python 转换参数数量
+///（如实例方法的 `self`、类方法的 `cls`）；这些槽位不会被触及。
 pub fn releaseArgsTuple(
     comptime Fn: type,
     args: *std.meta.ArgsTuple(Fn),
@@ -49,13 +47,12 @@ pub fn releaseArgsTuple(
     }
 }
 
-/// Count the required (non-optional) parameters in a function's parameter
-/// list, skipping the first `skip` parameters (e.g. `self`/`cls` for instance
-/// and class methods). Parameters with no type (e.g. `anytype`) are not
-/// counted.
+/// 计算函数参数列表中必需（非 optional）参数的数量，跳过前 `skip` 个参数
+///（如实例方法和类方法的 `self`/`cls`）。没有类型的参数（如 `anytype`）
+/// 不计入。
 ///
-/// Comptime-only. Used by `pyfn_typed` and `MethodBuilder.wrapMethod` to
-/// compute the minimum positional arity for arity-check error messages.
+/// 仅编译期使用。`pyfn_typed` 和 `MethodBuilder.wrapMethod` 用它计算最小
+/// 位置参数数量，用于参数数量检查的错误消息。
 pub fn requiredParamCount(comptime Fn: type, comptime skip: usize) usize {
     const Params = @typeInfo(Fn).@"fn".params;
     var count: usize = 0;
@@ -66,77 +63,85 @@ pub fn requiredParamCount(comptime Fn: type, comptime skip: usize) usize {
     return count;
 }
 
-/// Extract a single positional argument from a Python tuple and convert it.
+/// 从 Python 元组中提取单个位置参数并转换。
 ///
-/// On success, returns the converted value. On failure, sets the appropriate
-/// Python exception (`TypeError` for missing/mismatched arguments) and returns
-/// `null`. The caller is responsible for releasing any previously converted
-/// arguments and returning `null` from the wrapper.
+/// 成功时返回转换后的值（对于 `?T` 类型，值可以是 `null`，表示 Python
+/// `None` 被成功转换——这与转换失败有本质区别）。
 ///
-/// `arg_label` is used in the error message and should identify the argument
-/// (e.g. the 1-based index as a string, or the parameter name).
+/// 失败时返回错误。如果 `fromPy` 已设置 Python 异常（如溢出错误），异常
+/// 被保留；否则设置 `TypeError` 含参数期望/实际类型信息。调用方应在
+/// `catch` 块中释放先前已转换的参数并从包装器返回 `null`/`-1`。
+///
+/// 返回 `Error!PT` 而非 `?PT` 是为了消除 `??T` 歧义：当 `PT` 是 `?T`
+/// 时，`?PT` 无法区分"转换失败"与"成功转换为 None"。
+///
+/// `arg_label` 用于错误消息，应标识参数（如基于 1 的索引字符串或参数名）。
 pub fn extractPositionalArg(
     comptime PT: type,
     args_tuple: *types.Tuple,
     index: usize,
     arg_label: []const u8,
-) ?PT {
+) errors.Error!PT {
     const py_item = args_tuple.get(index) orelse {
         errors.typeError("missing argument {s}", .{arg_label});
-        return null;
+        return error.PyError;
     };
-    return convert.fromPy(PT, py_item) catch {
-        errors.typeError(
-            "argument {s} expects {s}, got {s}",
-            .{ arg_label, @typeName(PT), convert.pyTypeName(py_item) },
-        );
-        return null;
+    return convert.fromPy(PT, py_item) catch |err| {
+        // 保留 fromPy 可能已设置的更具体异常（如 OverflowError），
+        // 仅在无异常时设置 TypeError。
+        if (errors.errorOccurred() == null) {
+            errors.typeError(
+                "argument {s} expects {s}, got {s}",
+                .{ arg_label, @typeName(PT), convert.pyTypeName(py_item) },
+            );
+        }
+        return err;
     };
 }
 
-/// Convert a Python object into a struct field value, handling optional types
-/// and `None` inputs. Used by `pyfn_kw` and any wrapper that fills struct
-/// fields from Python arguments.
+/// 将 Python 对象转换为结构体字段值，处理可选类型和 `None` 输入。
+/// 由 `pyfn_kw` 和任何从 Python 参数填充结构体字段的包装器使用。
 ///
-/// On success, returns the converted value. On failure, sets a `TypeError`
-/// (with `field_name` and the expected/actual type names) and returns `null`.
-/// The caller is responsible for releasing any previously converted fields.
+/// 成功时返回转换后的值。失败时返回错误，保留 `fromPy` 已设置的具体异常
+/// 或在无异常时设置 `TypeError`。调用方负责释放任何先前已转换的字段。
 pub fn convertField(
     comptime FT: type,
     py_item: *Object,
     field_name: []const u8,
-) ?FT {
+) errors.Error!FT {
     if (@typeInfo(FT) == .optional) {
         if (py_item.isNone()) return null;
         const InnerT = @typeInfo(FT).optional.child;
-        return convert.fromPy(InnerT, py_item) catch {
+        return convert.fromPy(InnerT, py_item) catch |err| {
+            if (errors.errorOccurred() == null) {
+                errors.typeError(
+                    "argument '{s}' expects {s}, got {s}",
+                    .{ field_name, @typeName(FT), convert.pyTypeName(py_item) },
+                );
+            }
+            return err;
+        };
+    }
+    return convert.fromPy(FT, py_item) catch |err| {
+        if (errors.errorOccurred() == null) {
             errors.typeError(
                 "argument '{s}' expects {s}, got {s}",
                 .{ field_name, @typeName(FT), convert.pyTypeName(py_item) },
             );
-            return null;
-        };
-    }
-    return convert.fromPy(FT, py_item) catch {
-        errors.typeError(
-            "argument '{s}' expects {s}, got {s}",
-            .{ field_name, @typeName(FT), convert.pyTypeName(py_item) },
-        );
-        return null;
+        }
+        return err;
     };
 }
 
-/// Validate keyword argument names against a comptime list of valid names.
+/// 验证关键字参数名是否与编译期有效名称列表匹配。
 ///
-/// Iterates over every key in `kwargs_dict` and ensures each is a string that
-/// matches one of `names`, and that the corresponding index is not already
-/// occupied by a positional argument (`pos_count`). On any violation, sets a
-/// `TypeError` and returns `false`; the caller should abort the wrapper.
+/// 遍历 `kwargs_dict` 中的每个键，确保每个键都是字符串且匹配 `names` 中
+/// 的某一个，并且对应的索引未被位置参数占用（`pos_count`）。违反任何条件
+/// 时，设置 `TypeError` 并返回 `false`；调用方应中止包装器。
 ///
-/// `nameAtIndex` must be a `comptime fn(comptime usize) []const u8` that
-/// returns the valid keyword name for a given index, or an empty string if
-/// the index is out of range. The index is comptime because callers iterate
-/// it inside an `inline for`.
+/// `nameAtIndex` 必须是一个 `comptime fn(comptime usize) []const u8`，对
+/// 给定索引返回有效的关键字名称，若索引超出范围则返回空字符串。索引在
+/// 编译期传递，因为调用方在 `inline for` 中遍历它。
 pub fn validateKeywordNames(
     kwargs_dict: *types.Dict,
     pos_count: usize,
@@ -181,12 +186,11 @@ pub fn validateKeywordNames(
     return true;
 }
 
-/// Convert a Zig return value (possibly an error union) into a Python object
-/// suitable for returning from a `PyMethodDef` callback.
+/// 将 Zig 返回值（可能为错误联合类型）转换为适合从 `PyMethodDef` 回调返回
+/// 的 Python 对象。
 ///
-/// On a Zig error, maps it to a Python exception (unless one is already set)
-/// and returns `null`. On success, returns a NEW reference. Owned temporary
-/// values produced by the wrapper are released via `releaseReturnedValue`.
+/// 遇到 Zig 错误时，将其映射到 Python 异常（除非已设置）并返回 `null`。
+/// 成功时返回一个新引用。包装器产生的临时值通过 `releaseReturnedValue` 释放。
 pub fn handleReturn(comptime RT: type, result: RT) ?*c.PyObject {
     switch (@typeInfo(RT)) {
         .error_union => {
@@ -203,14 +207,12 @@ pub fn handleReturn(comptime RT: type, result: RT) ?*c.PyObject {
     }
 }
 
-/// Release ownership of a wrapper-produced value after `toPy` has converted it
-/// to a Python object.
+/// 在 `toPy` 将包装器产生的值转换为 Python 对象后，释放其所有权。
 ///
-/// Zig functions that return `*Object` / `*c.PyObject` follow the CPython
-/// return-value convention: they return a NEW reference. `toPy` already
-/// incref'd to produce the Python-side new ref, so the original is decref'd
-/// here to avoid a leak. Mutable `[]u8` slices returned by the wrapper are
-/// freed through `convert.releaseValue`.
+/// 返回 `*Object` / `*c.PyObject` 的 Zig 函数遵循 CPython 返回值约定：
+/// 它们返回一个新引用。`toPy` 已经 incref 产生了 Python 端的新引用，因此
+/// 在此 decref 原始值以避免泄漏。包装器返回的可变 `[]u8` 切片通过
+/// `convert.releaseValue` 释放。
 fn releaseReturnedValue(value: anytype) void {
     const T = @TypeOf(value);
     switch (@typeInfo(T)) {
@@ -231,6 +233,33 @@ fn releaseReturnedValue(value: anytype) void {
             }
             if (pointer_info.size == .slice and pointer_info.child == u8 and !pointer_info.is_const) {
                 convert.releaseValue(&value);
+            }
+        },
+        .@"struct" => |struct_info| {
+            // Handle top-level ArrayList(T): deinit its backing buffer.
+            if (comptime traits.isArrayList(T)) {
+                var mut = value;
+                mut.deinit(mem.allocator);
+                return;
+            }
+            // Release *Object / ?*Object fields (incref'd by toPy) and
+            // ArrayList(T) fields (backing buffer) and owned []u8 fields.
+            inline for (struct_info.fields) |field| {
+                const FT = field.type;
+                if (comptime traits.isObjectPtr(FT)) {
+                    @field(value, field.name).decref();
+                } else if (comptime traits.isObjectPtrOptional(FT)) {
+                    if (@field(value, field.name)) |obj| obj.decref();
+                } else if (comptime traits.isArrayList(FT)) {
+                    var mut = @field(value, field.name);
+                    mut.deinit(mem.allocator);
+                } else if (comptime @typeInfo(FT) == .pointer and
+                    @typeInfo(FT).pointer.size == .slice and
+                    @typeInfo(FT).pointer.child == u8 and
+                    !@typeInfo(FT).pointer.is_const)
+                {
+                    convert.releaseValue(&@field(value, field.name));
+                }
             }
         },
         else => {},

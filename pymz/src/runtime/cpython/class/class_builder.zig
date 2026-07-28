@@ -1,4 +1,4 @@
-//! Unified Python class builder: core helpers, lifecycle callbacks, and generation wiring.
+//! 统一的 Python 类构建器：核心辅助函数、生命周期回调和生成编排。
 
 const std = @import("std");
 const c = @import("python_c");
@@ -18,10 +18,8 @@ pub const Object = object.Object;
 pub const Error = errors.Error;
 
 pub const ClassDef = struct {
-    /// The name baked into the type object's ``tp_name`` at comptime. This is
-    /// informational: the actual attribute name under which the class is
-    /// exported in a module is determined by ``Module.addClass``'s first
-    /// parameter, not by this field.
+    /// 编译期写入类型对象 ``tp_name`` 的名称。此为参考信息：类在模块中导出的
+    /// 实际属性名由 ``Module.addClass`` 的第一个参数决定，而非此字段。
     name: [:0]const u8,
     ready_fn: *const fn () ?*c.PyTypeObject,
     doc: ?[:0]const u8,
@@ -40,12 +38,10 @@ pub fn Wrapper(comptime T: type) type {
         _storage: [@sizeOf(T)]u8 align(@alignOf(T)),
 
         comptime {
-            // Layout invariants required for safe CPython interop:
-            // - PyObject header at offset 0 so CPython can treat the wrapper
-            //   as a regular PyObject via pointer casts.
+            // 安全 CPython 互操作所需的布局不变性：
+            // - PyObject 头部在偏移量 0 处，使 CPython 可通过指针转换将包装器视为常规 PyObject。
+            // - 整体对齐必须满足 T，使 ``_storage`` 可转换为 ``*T`` 而不产生不对齐。
             std.debug.assert(@offsetOf(@This(), "ob_base") == 0);
-            // - Overall alignment must satisfy T so that ``_storage`` can be
-            //   cast to ``*T`` without misalignment.
             std.debug.assert(@alignOf(@This()) >= @alignOf(T));
         }
 
@@ -68,9 +64,8 @@ pub fn Wrapper(comptime T: type) type {
 }
 
 pub inline fn unwrap(comptime T: type, py: *c.PyObject) *T {
-    // std.debug.assert only fires in Debug/ReleaseSafe, matching the previous
-    // explicit mode check. Reaching these with a null pointer is a C API
-    // contract violation, not a user-facing error.
+    // std.debug.assert 仅在 Debug/ReleaseSafe 模式下触发。传入空指针是 C API
+    // 契约违规，而非用户可处理的错误。
     std.debug.assert(@intFromPtr(py) != 0);
     std.debug.assert(@intFromPtr(py.*.ob_type) != 0);
     return Wrapper(T).fromPyObject(py).getData();
@@ -124,6 +119,18 @@ pub fn LifecycleBuilder(comptime T: type) type {
         const has_custom_new = @hasDecl(T, "__new__");
         const has_del = @hasDecl(T, "__del__");
         const NewFn = if (has_custom_new) @TypeOf(T.__new__) else fn () void;
+        // GC 参与：类有框架管理的 PyObject 字段或用户定义的 __traverse__/__clear__
+        // 时启用 GC。py_dealloc 需在清理前 untrack 以防止 GC 遍历半拆除的对象。
+        const has_gc = @hasDecl(T, "__traverse__") or @hasDecl(T, "__clear__") or blk: {
+            for (fields) |field| {
+                if (!isPrivateField(field.name)) {
+                    if (traits.isObjectPtr(field.type) or traits.isObjectPtrOptional(field.type)) {
+                        break :blk true;
+                    }
+                }
+            }
+            break :blk false;
+        };
 
         pub fn py_new(
             type_obj: *c.PyTypeObject,
@@ -185,8 +192,7 @@ pub fn LifecycleBuilder(comptime T: type) type {
                     converted_count += 1;
                 }
                 const result = @call(.auto, T.__new__, zig_args);
-                // `__new__` may return either a plain value or an error union.
-                // Compile-time dispatch keeps the non-error path zero-cost.
+                // __new__ 可能返回普通值或错误联合。编译期分发使非错误路径零开销。
                 if (@typeInfo(@TypeOf(result)) == .error_union) {
                     wrapper.getData().* = result catch |err| {
                         marshal.releaseArgsTuple(NewFn, &zig_args, converted_count, 0);
@@ -223,21 +229,34 @@ pub fn LifecycleBuilder(comptime T: type) type {
                 } else if (idx < num_pos) {
                     const py_item = args_tuple.?.get(idx) orelse {
                         errors.typeError("missing argument '{s}'", .{field.name});
-                        cleanupFieldsPrefix(data_ptr, initialized_count);
+                        initErrorCleanup(data_ptr, initialized_count);
                         return -1;
                     };
-                    @field(data_ptr.*, field.name) = convert.fromPy(field.type, py_item) catch {
-                        cleanupFieldsPrefix(data_ptr, initialized_count);
-                        return -1;
+                    @field(data_ptr.*, field.name) = blk: {
+                        const converted = convert.fromPy(field.type, py_item) catch {
+                            initErrorCleanup(data_ptr, initialized_count);
+                            return -1;
+                        };
+                        // fromPy 对 *Object / ?*Object 返回借用引用（无 incref），
+                        // 类字段需要 owned 引用（dealloc 时由 cleanupFields decref），
+                        // 因此在此显式 incref。
+                        if (comptime traits.isObjectPtr(field.type)) {
+                            converted.incref();
+                        } else if (comptime traits.isObjectPtrOptional(field.type)) {
+                            if (converted) |o| o.incref();
+                        }
+                        break :blk converted;
                     };
                     idx += 1;
                 } else if (field.default_value_ptr) |dv| {
-                    @field(data_ptr.*, field.name) = dv.*;
+                    // default_value_ptr is *const anyopaque; cast to the field's
+                    // type before dereferencing to load the comptime-known default.
+                    @field(data_ptr.*, field.name) = @as(*const field.type, @ptrCast(@alignCast(dv))).*;
                 } else if (@typeInfo(field.type) == .optional) {
                     @field(data_ptr.*, field.name) = null;
                 } else {
                     errors.typeError("missing required argument '{s}'", .{field.name});
-                    cleanupFieldsPrefix(data_ptr, initialized_count);
+                    initErrorCleanup(data_ptr, initialized_count);
                     return -1;
                 }
                 initialized_count += 1;
@@ -246,30 +265,64 @@ pub fn LifecycleBuilder(comptime T: type) type {
             return 0;
         }
 
-        fn cleanupFields(data: *T) void {
-            inline for (fields) |field| {
-                const FT = field.type;
-                if (comptime traits.isObjectPtr(FT)) {
-                    @field(data, field.name).decref();
-                } else if (comptime traits.isObjectPtrOptional(FT)) {
-                    if (@field(data, field.name)) |obj| obj.decref();
-                } else if (!comptime isPrivateField(field.name)) {
-                    convert.releaseValue(&@field(data, field.name));
+        /// 释放结构体字段资源。
+        ///
+        /// `count` 为 `null` 时释放所有字段（用于 `py_dealloc`）；为 `n` 时只
+        /// 释放前 `n` 个字段（用于 `py_init` 部分初始化失败后的回滚）。
+        ///
+        /// 类型感知：
+        ///   - `isObjectPtr`：decref（PyObject 指针字段，框架持有新引用）。
+        ///   - `isObjectPtrOptional`：非空时 decref。
+        ///   - 非私有字段：`releaseValue`（处理 owned bytes、ArrayList 等）。
+        ///   - 私有字段（`_` 前缀）：跳过，由用户的 `__del__` 负责。
+        ///
+        /// 旧实现的 `cleanupFieldsPrefix` 仅调用 `releaseValue` 而无 `isObjectPtr`
+        /// 分支，导致 `py_init` 部分初始化失败时 `*Object` 字段不被 decref，造成
+        /// 引用泄漏。此合并实现统一类型感知逻辑，消除该泄漏。
+        ///
+        /// 实现说明：`inline for` 的循环索引 `i` 是 comptime 已知，但 `limit`
+        /// 来自运行时参数 `count`。Zig 0.16 禁止在 `inline for` 中用运行时条件
+        /// 触发 `continue`（"comptime control flow inside runtime block"），因此
+        /// 把运行时边界检查改为包裹循环体的 `if (i < limit)`，让 `comptime if`
+        /// 分支在 runtime block 内仍可被编译期求值。
+        fn cleanupFields(data: *T, count: ?usize) void {
+            const limit = count orelse fields.len;
+            inline for (fields, 0..) |field, i| {
+                if (i < limit) {
+                    const FT = field.type;
+                    if (comptime traits.isObjectPtr(FT)) {
+                        @field(data, field.name).decref();
+                    } else if (comptime traits.isObjectPtrOptional(FT)) {
+                        if (@field(data, field.name)) |obj| obj.decref();
+                        @field(data, field.name) = null;
+                    } else if (!comptime isPrivateField(field.name)) {
+                        convert.releaseValue(&@field(data, field.name));
+                    }
                 }
             }
         }
 
-        fn cleanupFieldsPrefix(data: *T, count: usize) void {
-            inline for (fields, 0..) |field, i| {
-                if (i < count and !comptime isPrivateField(field.name)) {
-                    convert.releaseValue(&@field(data, field.name));
-                }
+        /// Error-path cleanup for py_init: calls __del__ (if any fields were
+        /// initialized) to release private field resources, then cleanupFields
+        /// for public fields. The user's __del__ must handle partially
+        /// initialized state (uninitialized fields are zeroed memory).
+        fn initErrorCleanup(data: *T, count: usize) void {
+            if (has_del and count > 0) {
+                T.__del__(data);
             }
+            cleanupFields(data, count);
         }
 
         pub fn py_dealloc(py_self: ?*c.PyObject) callconv(.c) void {
             const py = py_self orelse return;
             const wrapper: *Self = @ptrCast(@alignCast(py));
+
+            // GC 跟踪对象在 cleanupFields 之前取消跟踪，以防止
+            // decref 触发对部分拆除对象的 GC 遍历。
+            // 使用 pymz_PyObject_GC_UnTrack 包装器（python_c.h），在所有 Python 版本中可见。
+            if (comptime has_gc) {
+                c.pymz_PyObject_GC_UnTrack(@ptrCast(py));
+            }
 
             var exc_type: ?*c.PyObject = null;
             var exc_value: ?*c.PyObject = null;
@@ -283,7 +336,7 @@ pub fn LifecycleBuilder(comptime T: type) type {
                 T.__del__(wrapper.getData());
             }
             if (wrapper.initialized) {
-                cleanupFields(wrapper.getData());
+                cleanupFields(wrapper.getData(), null);
             }
 
             if (had_exception) {
@@ -317,10 +370,9 @@ fn ClassDefHelpers(comptime name: [:0]const u8, comptime base: ?*const ClassDef,
     };
 }
 
-/// Private fields (names starting with `_`) are NOT automatically released
-/// by the framework's `cleanupFields` during deallocation. The user is
-/// responsible for freeing any resources owned by private fields, typically
-/// via `__del__`. Public fields are released automatically using `releaseValue`.
+/// 以下划线开头的私有字段不会在析构时由框架的 ``cleanupFields`` 自动释放。
+/// 用户需负责释放私有字段持有的资源，通常通过 ``__del__`` 实现。
+/// 公共字段使用 ``releaseValue`` 自动释放。
 pub fn generateClass(comptime name: [:0]const u8, comptime T: type, comptime base: ?*const ClassDef, comptime doc: ?[:0]const u8) type {
     const Helpers = ClassDefHelpers(name, base, doc);
     const Lifecycle = LifecycleBuilder(T);
@@ -347,7 +399,10 @@ pub fn generateClass(comptime name: [:0]const u8, comptime T: type, comptime bas
             var m = std.mem.zeroes(c.PyMappingMethods);
             if (ProtocolInfo.has_len) m.mp_length = @ptrCast(&ProtocolInfo.py_len);
             if (ProtocolInfo.has_getitem) m.mp_subscript = @ptrCast(&ProtocolInfo.py_getitem);
-            if (ProtocolInfo.has_setitem) m.mp_ass_subscript = @ptrCast(&ProtocolInfo.py_setitem);
+            // mp_ass_subscript 同时承担 __setitem__ 与 __delitem__：
+            // py_setitem 包装器按 py_value 是否为 NULL 分流到对应方法。
+            // 任一声明即需安装插槽。
+            if (ProtocolInfo.has_setitem or ProtocolInfo.has_delitem) m.mp_ass_subscript = @ptrCast(&ProtocolInfo.py_setitem);
             break :blk m;
         };
 
@@ -366,12 +421,11 @@ pub fn generateClass(comptime name: [:0]const u8, comptime T: type, comptime bas
         };
 
         pub var type_object: c.PyTypeObject = blk: {
-            // Hoist compound protocol conditions into named booleans so the
-            // slot-assignment block below stays scannable and each decision
-            // is documented at the point of declaration.
+            // 将复合协议条件提升为命名布尔常量，使插槽赋值块的每个决策在声明点即文档化。
             const has_mapping = ProtocolInfo.has_len or
                 ProtocolInfo.has_getitem or
-                ProtocolInfo.has_setitem;
+                ProtocolInfo.has_setitem or
+                ProtocolInfo.has_delitem;
             const has_sequence = ProtocolInfo.has_len or ProtocolInfo.has_contains;
             const has_gc = GCInfo.has_traverse or GCInfo.has_clear;
 
@@ -428,7 +482,12 @@ pub fn generateClass(comptime name: [:0]const u8, comptime T: type, comptime bas
                 t.tp_clear = @ptrCast(&GCInfo.py_clear);
             }
             if (has_gc) {
+                // GC 跟踪对象通过 PyType_GenericAlloc 分配，内存布局在
+                // PyObject 前包含 PyGC_Head。tp_free 必须是 PyObject_GC_Del
+                // 以正确释放整个 GC 头部 + 对象块；使用 PyObject_Free 会
+                // 从错误偏移释放，导致 GC 头部泄漏或堆损坏。
                 t.tp_flags |= c.Py_TPFLAGS_HAVE_GC;
+                t.tp_free = @ptrCast(&c.PyObject_GC_Del);
             }
             break :blk t;
         };
@@ -464,27 +523,91 @@ pub fn classWithBase(comptime name: [:0]const u8, comptime T: type, comptime bas
 }
 
 // ── GCBuilder ─────────────────────────────────────────────────────────────
-// Python GC protocol generation for Zig-backed classes.
-// Detects and wraps `__traverse__` / `__clear__` dunders declared on T, and
-// maps them to CPython's tp_traverse / tp_clear slot callbacks. The types are
-// merged into this file because they are only used by `generateClass` above.
+// 为 Zig 支持的类生成 Python GC 协议。
+//
+// 框架管理的公共 PyObject 字段（非 _ 前缀的 *Object / ?*Object）在 dealloc 时
+// 由 cleanupFields 自动 decref。GCBuilder 与此对称：py_traverse 自动访问这些
+// 字段使 GC 能检测循环引用，py_clear 自动清除 ?*Object 字段（decref + NULL）
+// 以打破循环。
+//
+// 用户通过 __traverse__ / __clear__ 管理私有字段（_ 前缀），作为框架自动
+// 行为的补充而非替代。当类同时有公共 PyObject 字段和用户定义的 __traverse__
+// 时，两者都会被调用：先访问框架字段，再调用用户的 __traverse__。
 
 pub fn GCBuilder(comptime T: type) type {
     return struct {
-        pub const has_traverse = @hasDecl(T, "__traverse__");
-        pub const has_clear = @hasDecl(T, "__clear__");
+        const fields = @typeInfo(T).@"struct".fields;
+
+        // 检测框架管理的公共 PyObject 字段：cleanupFields 在 dealloc 时管理
+        // 这些字段的引用计数，py_traverse 必须对称地访问它们以支持 GC
+        // 循环检测。
+        const has_framework_object_refs = blk: {
+            for (fields) |field| {
+                if (!isPrivateField(field.name)) {
+                    if (traits.isObjectPtr(field.type) or traits.isObjectPtrOptional(field.type)) {
+                        break :blk true;
+                    }
+                }
+            }
+            break :blk false;
+        };
+
+        // ?*Object 字段可被 tp_clear 安全置 NULL（打破循环引用）。
+        // *Object（非 optional）字段无法置 NULL，但仍纳入 has_clearable_refs
+        // 以确保 CPython 要求"tp_traverse 非 NULL 时 tp_clear 必须非 NULL"得到满足。
+        // py_clear 中 *Object 字段不会被 decref（无法置 NULL 避免 double-decref），
+        // 仅 ?*Object 字段被实际清除。
+        const has_clearable_refs = blk: {
+            for (fields) |field| {
+                if (!isPrivateField(field.name) and
+                    (traits.isObjectPtr(field.type) or traits.isObjectPtrOptional(field.type)))
+                {
+                    break :blk true;
+                }
+            }
+            break :blk false;
+        };
+
+        pub const has_user_traverse = @hasDecl(T, "__traverse__");
+        pub const has_user_clear = @hasDecl(T, "__clear__");
+
+        pub const has_traverse = has_user_traverse or has_framework_object_refs;
+        pub const has_clear = has_user_clear or has_clearable_refs;
 
         pub const handled_dunders: []const []const u8 = blk: {
             var names: []const []const u8 = &.{};
-            if (has_traverse) names = names ++ .{"__traverse__"};
-            if (has_clear) names = names ++ .{"__clear__"};
+            if (has_user_traverse) names = names ++ .{"__traverse__"};
+            if (has_user_clear) names = names ++ .{"__clear__"};
             break :blk names;
         };
 
         pub fn py_traverse(py_self: ?*c.PyObject, visit: c.visitproc, arg: ?*anyopaque) callconv(.c) c_int {
             const py = py_self orelse return -1;
             const data = unwrapConst(T, py);
-            if (comptime has_traverse) {
+
+            // 访问框架管理的公共 PyObject 字段，使 GC 能检测循环引用。
+            if (comptime has_framework_object_refs) {
+                const VisitFn = *const fn (?*c.PyObject, ?*anyopaque) callconv(.c) c_int;
+                const visit_fn: VisitFn = @ptrCast(visit);
+                inline for (fields) |field| {
+                    if (comptime !isPrivateField(field.name)) {
+                        if (comptime traits.isObjectPtr(field.type)) {
+                            const obj: ?*c.PyObject = @ptrCast(@field(data, field.name));
+                            if (obj != null) {
+                                if (visit_fn(obj, arg) != 0) return -1;
+                            }
+                        } else if (comptime traits.isObjectPtrOptional(field.type)) {
+                            if (@field(data, field.name)) |obj| {
+                                const py_obj: ?*c.PyObject = @ptrCast(obj);
+                                if (visit_fn(py_obj, arg) != 0) return -1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 调用用户的 __traverse__ 访问私有字段（_ 前缀）。
+            if (comptime has_user_traverse) {
                 const UserVisit = *const fn (*Object, ?*anyopaque) callconv(.c) c_int;
                 const user_visit: UserVisit = @ptrCast(visit);
                 @field(T, "__traverse__")(data, user_visit, arg) catch return -1;
@@ -495,7 +618,21 @@ pub fn GCBuilder(comptime T: type) type {
         pub fn py_clear(py_self: ?*c.PyObject) callconv(.c) c_int {
             const py = py_self orelse return -1;
             const data = unwrap(T, py);
-            if (comptime has_clear) {
+
+            // 清除框架管理的 ?*Object 字段（decref + NULL）。
+            if (comptime has_clearable_refs) {
+                inline for (fields) |field| {
+                    if (comptime !isPrivateField(field.name) and traits.isObjectPtrOptional(field.type)) {
+                        if (@field(data, field.name)) |obj| {
+                            obj.decref();
+                            @field(data, field.name) = null;
+                        }
+                    }
+                }
+            }
+
+            // 调用用户的 __clear__ 清除私有字段。
+            if (comptime has_user_clear) {
                 @field(T, "__clear__")(data) catch return -1;
             }
             return 0;
@@ -504,9 +641,9 @@ pub fn GCBuilder(comptime T: type) type {
 }
 
 // ── BufferBuilder ──────────────────────────────────────────────────────────
-// Python buffer protocol generation for Zig-backed classes.
-// Detects and wraps `__buffer__` / `__release_buffer__` dunders, mapping them
-// to CPython's tp_as_buffer.bf_getbuffer / bf_releasebuffer slots.
+// 为 Zig 支持的类生成 Python buffer 协议。
+// 检测并包装 __buffer__ / __release_buffer__ 特殊方法，映射到 CPython 的
+// tp_as_buffer.bf_getbuffer / bf_releasebuffer 插槽。
 
 pub fn BufferBuilder(comptime T: type) type {
     return struct {
@@ -635,10 +772,9 @@ pub fn BufferBuilder(comptime T: type) type {
 }
 
 // ── PropertiesBuilder ──────────────────────────────────────────────────────
-// Python property (getset) table generation for Zig-backed classes.
-// Public struct fields are exposed as Python attributes. The
-// `__pymz_readonly_fields__` magic constant can mark specific fields as
-// getter-only (no setter generated).
+// 为 Zig 支持的类生成 Python 属性（getset）表。
+// 公共结构体字段暴露为 Python 属性。只读字段可通过 pymz_meta.readonly_fields
+// 标记为仅 getter 的属性。
 
 pub fn PropertiesBuilder(comptime T: type) type {
     return struct {
@@ -646,8 +782,10 @@ pub fn PropertiesBuilder(comptime T: type) type {
         const public_count = countPublicFields(T);
 
         fn isReadOnlyField(comptime field_name: []const u8) bool {
-            if (!@hasDecl(T, "__pymz_readonly_fields__")) return false;
-            const ro = T.__pymz_readonly_fields__;
+            if (!@hasDecl(T, "pymz_meta")) return false;
+            const meta = T.pymz_meta;
+            if (!@hasField(@TypeOf(meta), "readonly_fields")) return false;
+            const ro = meta.readonly_fields;
             if (!@hasField(@TypeOf(ro), field_name)) return false;
             return @field(ro, field_name);
         }
@@ -682,14 +820,33 @@ pub fn PropertiesBuilder(comptime T: type) type {
             const Setter = struct {
                 fn set(py_self: ?*c.PyObject, py_value: ?*c.PyObject, _: ?*anyopaque) callconv(.c) c_int {
                     const py = py_self orelse return -1;
-                    const data = unwrap(T, py);
+                    const wrapper: *Wrapper(T) = @ptrCast(@alignCast(py));
+                    const data = wrapper.getData();
                     const v = py_value orelse {
                         errors.typeError("cannot delete attribute '{s}'", .{field_name});
                         return -1;
                     };
                     const obj: *Object = @ptrCast(v);
                     const new_value = convert.fromPy(FieldType, obj) catch return -1;
-                    convert.releaseValue(&@field(data, field_name));
+                    // fromPy returns a borrowed reference for *Object / ?*Object;
+                    // class fields need owned references, so incref here.
+                    if (comptime traits.isObjectPtr(FieldType)) {
+                        new_value.incref();
+                    } else if (comptime traits.isObjectPtrOptional(FieldType)) {
+                        if (new_value) |o| o.incref();
+                    }
+                    // Release old value only if the object has been initialized.
+                    // Before initialization (PyType_GenericNew zeroes memory),
+                    // calling decref on a zeroed *Object is UB in Zig.
+                    if (wrapper.initialized) {
+                        if (comptime traits.isObjectPtr(FieldType)) {
+                            @field(data, field_name).decref();
+                        } else if (comptime traits.isObjectPtrOptional(FieldType)) {
+                            if (@field(data, field_name)) |old| old.decref();
+                        } else {
+                            convert.releaseValue(&@field(data, field_name));
+                        }
+                    }
                     @field(data, field_name) = new_value;
                     return 0;
                 }
@@ -708,42 +865,42 @@ pub fn PropertiesBuilder(comptime T: type) type {
 
 const testing = std.testing;
 
-test "isPrivateField identifies underscore-prefixed names" {
+test "isPrivateField 识别以下划线开头的名称" {
     try testing.expect(isPrivateField("_internal"));
     try testing.expect(isPrivateField("__dunder"));
     try testing.expect(!isPrivateField("public"));
     try testing.expect(!isPrivateField("a"));
-    // Empty string is not private: no leading underscore.
+    // 空字符串没有前导下划线，不是私有字段。
     try testing.expect(!isPrivateField(""));
 }
 
-test "isSelfParam matches value and pointer self types" {
+test "isSelfParam 匹配值和指针类型的 self 参数" {
     const T = struct { x: i32 };
 
-    // By value.
+    // 按值传递。
     try testing.expect(isSelfParam(T, T));
 
-    // By pointer (const and mutable).
+    // 按指针传递（const 和 mutable）。
     try testing.expect(isSelfParam(*T, T));
     try testing.expect(isSelfParam(*const T, T));
 
-    // Non-matching types.
+    // 不匹配的类型。
     try testing.expect(!isSelfParam(i32, T));
     try testing.expect(!isSelfParam(*i32, T));
 }
 
-test "countPublicFields skips private fields" {
+test "countPublicFields 跳过私有字段" {
     const T = struct {
         public_a: i32,
         _private_b: i32,
         public_c: []const u8,
         __pymz_marker__: i32 = 0,
     };
-    // public_a and public_c are public; _private_b and __pymz_marker__ are private.
+    // public_a 和 public_c 是公共字段；_private_b 和 __pymz_marker__ 是私有字段。
     try testing.expectEqual(@as(usize, 2), countPublicFields(T));
 }
 
-test "countPublicFields returns zero for all-private struct" {
+test "countPublicFields 全私有结构体返回零" {
     const T = struct {
         _a: i32,
         _b: i32,
@@ -751,7 +908,7 @@ test "countPublicFields returns zero for all-private struct" {
     try testing.expectEqual(@as(usize, 0), countPublicFields(T));
 }
 
-test "countPublicFields returns count for all-public struct" {
+test "countPublicFields 全公共结构体返回正确计数" {
     const T = struct {
         a: i32,
         b: i32,
@@ -760,49 +917,46 @@ test "countPublicFields returns count for all-public struct" {
     try testing.expectEqual(@as(usize, 3), countPublicFields(T));
 }
 
-test "Wrapper places PyObject at offset zero" {
+test "Wrapper 将 PyObject 放置在偏移量零处" {
     const T = struct { x: i64, y: i64 };
     const W = Wrapper(T);
-    // The PyObject header must be the first field so CPython can cast the
-    // wrapper pointer to PyObject*.
+    // PyObject 头部必须是第一个字段，使 CPython 可将包装器指针转换为 PyObject*。
     try testing.expectEqual(@as(usize, 0), @offsetOf(W, "ob_base"));
 }
 
-test "Wrapper storage is aligned to T" {
+test "Wrapper 的存储对齐满足 T" {
     const T = struct { x: i64, y: i64 };
     const W = Wrapper(T);
-    // The overall wrapper alignment must satisfy T's alignment so that
-    // _storage can be cast to *T without misalignment.
+    // 整体包装器对齐必须满足 T 的对齐要求，使 _storage 可转换为 *T 而不产生不对齐。
     try testing.expect(@alignOf(W) >= @alignOf(T));
 }
 
-test "Wrapper storage has enough bytes for T" {
+test "Wrapper 的存储空间足以容纳 T" {
     const T = struct { x: i64, y: i64, z: [16]u8 };
     const W = Wrapper(T);
-    // _storage is [@sizeOf(T)]u8, so the wrapper must be at least that large
-    // plus the PyObject header.
+    // _storage 是 [@sizeOf(T)]u8，因此包装器必须至少为 PyObject 头部加上 T 的大小。
     try testing.expect(@sizeOf(W) >= @sizeOf(c.PyObject) + @sizeOf(T));
 }
 
-test "extractClassOptions accepts doc string" {
+test "extractClassOptions 接受文档字符串" {
     const opts = extractClassOptions("a doc");
     try testing.expectEqualStrings("a doc", opts.doc.?);
     try testing.expect(opts.limited == null);
 }
 
-test "extractClassOptions accepts options struct" {
+test "extractClassOptions 接受选项结构体" {
     const opts = extractClassOptions(.{ .doc = "d", .limited = true });
     try testing.expectEqualStrings("d", opts.doc.?);
     try testing.expect(opts.limited.? == true);
 }
 
-test "extractClassOptions accepts options struct with only doc" {
+test "extractClassOptions 接受仅含 doc 的选项结构体" {
     const opts = extractClassOptions(.{ .doc = "only doc" });
     try testing.expectEqualStrings("only doc", opts.doc.?);
     try testing.expect(opts.limited == null);
 }
 
-test "extractClassOptions accepts options struct with only limited" {
+test "extractClassOptions 接受仅含 limited 的选项结构体" {
     const opts = extractClassOptions(.{ .limited = false });
     try testing.expect(opts.doc == null);
     try testing.expect(opts.limited.? == false);

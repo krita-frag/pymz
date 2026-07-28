@@ -1,9 +1,9 @@
 const std = @import("std");
 
-// The public build-helper API lives directly in `core/main.zig`. Importing it
+// The public build-helper API lives directly in `main.zig`. Importing it
 // here re-exports `buildProject` and its option/struct types to consumers that
 // reach pymz-tool through `b.dependency("pymz-tool", .{}).builder`.
-pub const core = @import("src/core/main.zig");
+pub const core = @import("src/main.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
 
     // Unit tests for core/ modules (cross-compilation, python-config).
     const test_module = b.createModule(.{
-        .root_source_file = b.path("src/core_tests.zig"),
+        .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
     });

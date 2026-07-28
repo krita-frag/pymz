@@ -1,20 +1,18 @@
-//! Cross-compilation helpers for pymz build projects.
+//! pymz 构建项目的交叉编译辅助工具。
 
 const std = @import("std");
 
-/// Configuration for one cross-compilation target in a `buildProject` matrix.
+/// `buildProject` 矩阵中单个交叉编译目标的配置。
 pub const CrossTargetConfig = struct {
     triple: []const u8,
     label: []const u8,
 };
 
-/// Default cross targets used when the `--cross-targets` CLI option does not
-/// override them.
+/// 当 `--cross-targets` CLI 选项未覆盖时使用的默认交叉编译目标。
 ///
-/// The matrix itself (runtimes x versions x targets) is owned by the Python
-/// orchestrator (`pymz_tool.matrix`), which invokes `zig build` once per cell.
-/// These defaults only apply when a project's own `build.zig` is run directly
-/// via `zig build <step>-multi` without the Python tool.
+/// 矩阵本身（运行环境 x 版本 x 目标）由 Python 编排器（`pymz_tool.matrix`）管理，
+/// 它每个单元格调用一次 `zig build`。这些默认值仅适用于项目的 `build.zig`
+/// 通过 `zig build <step>-multi` 直接运行且不使用 Python 工具的情况。
 pub const default_cross_targets: []const CrossTargetConfig = &.{
     .{ .triple = "x86_64-linux-gnu", .label = "linux-x86_64" },
     .{ .triple = "aarch64-linux-gnu", .label = "linux-aarch64" },
@@ -23,24 +21,22 @@ pub const default_cross_targets: []const CrossTargetConfig = &.{
     .{ .triple = "x86_64-macos-none", .label = "macos-x86_64" },
 };
 
-/// Cross-linking Python extensions requires Python headers and libraries that
-/// match the target OS. `python-config` only reports the host toolchain, so
-/// skip targets whose OS differs from the host unless an explicit target
-/// Python configuration is supplied via `PYMZ_PYTHON_INCLUDES` and friends.
+/// 交叉链接 Python 扩展需要与目标 OS 匹配的 Python 头文件和库。
+/// `python-config` 仅报告主机工具链，因此跳过 OS 与主机不同的目标，
+/// 除非通过 `PYMZ_PYTHON_INCLUDES` 等提供了明确的目标 Python 配置。
 pub fn shouldSkipCrossTarget(target: std.Build.ResolvedTarget) bool {
     const host_os = @import("builtin").os.tag;
     return host_os != target.result.os.tag;
 }
 
-/// Resolve cross targets with the following priority:
+/// 按以下优先级解析交叉编译目标：
 ///
-/// 1. `raw` - the `--cross-targets` CLI option (comma-separated triples).
-/// 2. `default_cross_targets` - the built-in matrix.
+/// 1. `raw` - `--cross-targets` CLI 选项（逗号分隔的三元组）。
+/// 2. `default_cross_targets` - 内置矩阵。
 ///
-/// The matrix declared in `pymz.json` is intentionally not read here: that
-/// matrix is expanded by the Python orchestrator, which calls `zig build`
-/// once per cell with a single `-Dtarget`. Keeping this layer free of config
-/// parsing avoids a second, divergent source of truth for the matrix.
+/// 此处有意不读取 `pymz.json` 中声明的矩阵：该矩阵由 Python 编排器展开，
+/// 它对每个单元格以单个 `-Dtarget` 调用一次 `zig build`。
+/// 保持此层免于配置解析可避免矩阵出现第二个不一致的数据源。
 pub fn resolveCrossTargets(
     b: *std.Build,
     raw: ?[]const u8,
@@ -122,7 +118,7 @@ test "resolveCrossTargets parses multiple CLI targets" {
     try testing.expectEqualStrings("aarch64-linux-gnu", targets[0].triple);
     try testing.expectEqualStrings("aarch64-linux-gnu", targets[0].label);
     try testing.expectEqualStrings("x86_64-macos-none", targets[1].triple);
-    // `labelFromTriple` normalizes `_` to `-`, so the derived label uses dashes.
+    // labelFromTriple 将 `_` 规范化为 `-`，因此派生标签使用短横线。
     try testing.expectEqualStrings("x86-64-macos-none", targets[1].label);
 }
 
@@ -142,10 +138,9 @@ test "labelFromTriple normalizes separators to dashes" {
     try testing.expectEqualStrings("aarch64-linux-gnu", label);
 }
 
-/// Test-only shim mirroring `resolveCrossTargets` but operating on a plain
-/// allocator so we can exercise the logic without constructing a full
-/// `*std.Build`. The production function delegates string lifetime concerns to
-/// `b.dupe` / `b.allocator`; the algorithm is identical.
+/// 仅用于测试的垫片，镜像 `resolveCrossTargets` 但在普通分配器上操作，
+/// 以便无需构造完整的 `*std.Build` 即可测试逻辑。
+/// 生产函数将字符串生命周期委托给 `b.dupe` / `b.allocator`；算法相同。
 fn resolveCrossTargetsImpl(
     allocator: std.mem.Allocator,
     raw: ?[]const u8,

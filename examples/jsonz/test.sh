@@ -87,10 +87,10 @@ if [ "$LOADER_ONLY" = false ]; then
   fi
 
   if [ "$VERBOSE" = true ]; then
-    echo "=== zig build example (py${PY_VER}) ==="
+    echo "=== zig build pymz (py${PY_VER}) ==="
   fi
 
-  (cd "$EXAMPLE_DIR" && zig build example \
+  (cd "$EXAMPLE_DIR" && zig build pymz \
     -Dpymz-python-config="$PYTHON_CONFIG" \
     -Dpython-version="$PY_VER" \
     $OPT_FLAG \
@@ -105,8 +105,8 @@ if [ "$LOADER_ONLY" = false ]; then
     fi
   done
 
-  # `zig build example` does not emit `pymz-manifest.json` (that file is
-  # produced by `example-multi`). Generate one so the loader can discover
+  # `zig build pymz` does not emit `pymz-manifest.json` (that file is
+  # produced by `pymz-multi`). Generate one so the loader can discover
   # the built artifact. A real wheel build would use `pymz-tool build`.
   "$PYTHON" -c "
 import json, os, sys
@@ -125,7 +125,7 @@ manifest = {
     'version': '0.1.0',
     'runtime': 'cpython3',
     'distribution': 'jsonz',
-    'zig_target': 'example',
+    'zig_target': 'pymz',
     'artifacts': [{'filename': so_file, 'kind': 'extension', 'module': '_jsonz'}],
 }
 with open('$PACKAGE_DIR/pymz-manifest.json', 'w') as f:
@@ -150,22 +150,34 @@ fi
 if "$PYTHON" -m pytest --version >/dev/null 2>&1; then
   echo "[test.sh] running full test suite (py${PY_VER})..."
 
-  # The pymz backend has a known issue: `m_size = -1` conflicts with
-  # multi-phase module initialization on Python 3.12+. When this is fixed,
-  # the import below will work and the loader test will also cover it.
-  # For now, test what we can:
+  # The pymz backend uses PEP 489 multi-phase initialization. If the .so
+  # was built against a different Python version than the runtime interpreter
+  # (e.g. built with 3.12 headers, loaded by 3.14), the ABI mismatch can
+  # cause a segfault during import. This is a build-environment issue, not
+  # a code bug. When the toolchain matches, the import works:
   #  - loader tests pass without the .so
   #  - if .so loads, run the full jsonz test suite
 
-  if "$PYTHON" -c "import jsonz" 2>/dev/null; then
+  IMPORT_ERROR=$("$PYTHON" -c "import jsonz" 2>&1) && IMPORT_OK=true || IMPORT_OK=false
+  if [ "$IMPORT_OK" = true ]; then
     "$PYTHON" -m pytest "$EXAMPLE_DIR/tests" -q
     echo "[test.sh] all tests OK (py${PY_VER})"
   else
-    echo "[test.sh] WARNING: py${PY_VER} runtime import failed (known m_size bug)."
-    echo "[test.sh] running loader tests only..."
-    "$PYTHON" -m pytest "$EXAMPLE_DIR/tests/test_loader.py" -q
-    echo "[test.sh] loader tests OK (py${PY_VER})"
-    echo "[test.sh] (jsonz extension built successfully)"
+    # 区分 ABI 不匹配（构建环境问题）与真实导入崩溃（代码 bug）。
+    case "$IMPORT_ERROR" in
+      *"undefined symbol"*|*"magic number"*|*"ABI"*|*"incompatible"*|*"version mismatch"*)
+        echo "[test.sh] WARNING: py${PY_VER} runtime import failed (ABI mismatch)."
+        echo "[test.sh] running loader tests only..."
+        "$PYTHON" -m pytest "$EXAMPLE_DIR/tests/test_loader.py" -q
+        echo "[test.sh] loader tests OK (py${PY_VER})"
+        echo "[test.sh] (jsonz extension built successfully)"
+        ;;
+      *)
+        echo "[test.sh] ERROR: py${PY_VER} import crashed (not an ABI mismatch):" >&2
+        echo "$IMPORT_ERROR" >&2
+        exit 1
+        ;;
+    esac
   fi
 else
   echo "[test.sh] pytest not available for py${PY_VER}, running smoke test..."

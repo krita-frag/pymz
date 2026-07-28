@@ -1,4 +1,4 @@
-//! Python method table generation for Zig-backed classes.
+//! 为 Zig 支持的类生成 Python 方法表。
 
 const std = @import("std");
 const c = @import("python_c");
@@ -12,18 +12,16 @@ const signature = @import("../signature.zig");
 const types = @import("../types.zig");
 const core = @import("class_builder.zig");
 
-/// Comptime helper: true when ``ValueType`` is a (possibly const) byte slice,
-/// i.e. a string literal or ``[]const u8``. Used to distinguish per-method
-/// param-name overrides given as a single comma-separated string from those
-/// given as an array of names.
+/// 编译期辅助函数：当 ``ValueType`` 是（可能是 const 的）字节切片时返回 true，
+/// 即字符串字面量或 ``[]const u8``。用于区分作为单个逗号分隔字符串给出的
+/// 逐方法参数名覆盖和作为名称数组给出的覆盖。
 fn isByteSlice(comptime ValueType: type) bool {
     const info = @typeInfo(ValueType);
     if (info != .pointer) return false;
     return switch (info.pointer.size) {
         .slice => info.pointer.child == u8,
-        // String literals (`*const [N:0]u8` / `*const [N]u8`) are pointers to
-        // u8 arrays; they coerce to `[]const u8` and are treated as a
-        // comma-separated parameter-name string.
+        // 字符串字面量（`*const [N:0]u8` / `*const [N]u8`）是指向 u8 数组的指针；
+        // 它们可转换为 `[]const u8`，被视为逗号分隔的参数名字符串。
         .one => switch (@typeInfo(info.pointer.child)) {
             .array => |arr| arr.child == u8,
             else => false,
@@ -39,26 +37,28 @@ pub fn MethodBuilder(comptime T: type) type {
         const MethodKind = enum { instance, static, class };
 
         fn methodParamNames(comptime method_name: []const u8) ?[]const u8 {
-            if (!@hasDecl(T, "__pymz_method_param_names__")) {
-                return null;
-            }
+            if (!@hasDecl(T, "pymz_meta")) return null;
+            const meta = T.pymz_meta;
+            if (!@hasField(@TypeOf(meta), "method_param_names")) return null;
+            const overrides = meta.method_param_names;
+            if (!@hasField(@TypeOf(overrides), method_name)) return null;
+            return extractParamNamesValue(@field(overrides, method_name));
+        }
 
-            const overrides = T.__pymz_method_param_names__;
-            if (!@hasField(@TypeOf(overrides), method_name)) {
-                return null;
-            }
-            const value = @field(overrides, method_name);
+        fn extractParamNamesValue(comptime value: anytype) ?[]const u8 {
             const ValueType = @TypeOf(value);
             if (isByteSlice(ValueType)) {
                 return value;
             }
-            // Assume array of parameter names and join them.
+            // 假设是参数名数组，拼接为字符串。
             return common.joinParamNames(value);
         }
 
         fn isClassMethod(comptime name: []const u8) bool {
-            if (!@hasDecl(T, "__pymz_class_methods__")) return false;
-            const cm = T.__pymz_class_methods__;
+            if (!@hasDecl(T, "pymz_meta")) return false;
+            const meta = T.pymz_meta;
+            if (!@hasField(@TypeOf(meta), "class_methods")) return false;
+            const cm = meta.class_methods;
             if (!@hasField(@TypeOf(cm), name)) return false;
             return @field(cm, name);
         }
@@ -100,7 +100,7 @@ pub fn MethodBuilder(comptime T: type) type {
             }
         };
 
-        /// Count instance/static/class methods in a single pass over `decls`.
+        /// 一次遍历 `decls` 统计实例/静态/类方法数量。
         fn countMethods() Counts {
             var instance_n: usize = 0;
             var static_n: usize = 0;
@@ -179,15 +179,15 @@ pub fn MethodBuilder(comptime T: type) type {
             };
         }
 
-        /// Unified wrapper for instance, static, and class methods.
+        /// 实例方法、静态方法和类方法的统一包装器。
         ///
-        /// The three method kinds differ only in:
-        ///   - how many leading params to skip (1 for instance/class, 0 for static)
-        ///   - how the first param is materialised (data pointer, cls, or nothing)
-        ///   - whether ``__enter__`` returning ``*T`` should return self
+        /// 三种方法类型仅在以下方面不同：
+        ///   - 需要跳过的前导参数数量（实例/类方法为 1，静态方法为 0）
+        ///   - 第一个参数如何实例化（数据指针、cls 或无）
+        ///   - ``__enter__`` 返回 ``*T`` 时是否应返回 self
         ///
-        /// All other logic — arity check, positional conversion, release, and
-        /// return handling — is identical and lives here once.
+        /// 所有其他逻辑——参数个数检查、位置参数转换、释放和返回值处理——
+        /// 完全相同，在此处实现一次。
         fn wrapMethod(
             comptime name: []const u8,
             comptime kind: MethodKind,
@@ -206,8 +206,8 @@ pub fn MethodBuilder(comptime T: type) type {
                     const args_tuple: ?*types.Tuple = if (py_args) |a| @ptrCast(a) else null;
                     const num_pos: usize = if (args_tuple) |t| t.length() else 0;
                     const N = Params.len - Skip;
-                    // Count required (non-optional) parameters, matching
-                    // pyfn_typed's behavior: optional params may be omitted.
+                    // 计算必需（非可选）参数的数量，与 pyfn_typed 的行为一致：
+                    // 可选参数可省略。
                     const required_count = comptime marshal.requiredParamCount(F, Skip);
                     if (num_pos < required_count or num_pos > N) {
                         errors.typeError(
@@ -220,8 +220,8 @@ pub fn MethodBuilder(comptime T: type) type {
                     var zig_args: std.meta.ArgsTuple(F) = undefined;
                     var converted_count: usize = 0;
 
-                    // Materialise the implicit first parameter (self/cls) for
-                    // instance and class methods. Static methods skip this.
+                    // 为实例方法和类方法实例化隐式第一个参数（self/cls）。
+                    // 静态方法跳过此步骤。
                     switch (kind) {
                         .instance => {
                             const py = py_self orelse return null;
@@ -252,22 +252,17 @@ pub fn MethodBuilder(comptime T: type) type {
                             marshal.releaseArgsTuple(F, &zig_args, converted_count, Skip);
                             return null;
                         };
-                        // Mirror pyfn_typed's dispatch: a runtime positional
-                        // check on top, with the comptime optional-type check
-                        // as a sibling `else if` branch. Nesting a comptime
-                        // branch (or `continue`) inside the runtime `if` is
-                        // rejected by Zig 0.16 as comptime control flow inside
-                        // a runtime block.
+                        // 镜像 pyfn_typed 的分发逻辑：先运行时位置参数检查，
+                        // 再通过编译期 else if 分支检查可选类型。在运行时 if
+                        // 内部嵌套编译期分支（或 continue）会被 Zig 0.16 拒绝，
+                        // 因为运行时块内不允许编译期控制流。
                         if (i < num_pos) {
                             const arg_label = comptime std.fmt.comptimePrint("{d}", .{i + 1});
-                            const converted = marshal.extractPositionalArg(PT, args_tuple.?, i, arg_label);
-                            if (converted) |value| {
-                                zig_args[i + Skip] = value;
-                                converted_count += 1;
-                            } else {
+                            zig_args[i + Skip] = marshal.extractPositionalArg(PT, args_tuple.?, i, arg_label) catch {
                                 marshal.releaseArgsTuple(F, &zig_args, converted_count, Skip);
                                 return null;
-                            }
+                            };
+                            converted_count += 1;
                         } else if (comptime @typeInfo(PT) == .optional) {
                             zig_args[i + Skip] = null;
                         } else {
@@ -281,8 +276,8 @@ pub fn MethodBuilder(comptime T: type) type {
                     marshal.releaseArgsTuple(F, &zig_args, converted_count, Skip);
                     const RT = @TypeOf(result);
 
-                    // ``__enter__`` returning the receiver participates in
-                    // with-statements by returning self instead of a new object.
+                    // ``__enter__`` 返回接收者自身，参与 with 语句时返回 self
+                    // 而非新对象。
                     if (is_enter) {
                         if (RT == *T or RT == *const T) {
                             const py = py_self orelse return null;
@@ -300,7 +295,7 @@ pub fn MethodBuilder(comptime T: type) type {
 }
 const testing = std.testing;
 
-test "MethodBuilder counts instance, static, and class methods" {
+test "MethodBuilder 统计实例、静态和类方法" {
     const T = struct {
         x: i32 = 0,
 
@@ -312,8 +307,8 @@ test "MethodBuilder counts instance, static, and class methods" {
             return a + b;
         }
 
-        pub const __pymz_class_methods__ = .{
-            .classMethod = true,
+        pub const pymz_meta = .{
+            .class_methods = .{ .classMethod = true },
         };
         pub fn classMethod(cls: *c.PyObject, a: i32) i32 {
             _ = cls;
@@ -327,13 +322,13 @@ test "MethodBuilder counts instance, static, and class methods" {
     try testing.expectEqual(@as(usize, 3), M.total_method_count);
 }
 
-test "MethodBuilder total_method_count is zero for empty struct" {
+test "MethodBuilder 空结构体的 total_method_count 为零" {
     const T = struct {};
     const M = MethodBuilder(T);
     try testing.expectEqual(@as(usize, 0), M.total_method_count);
 }
 
-test "MethodBuilder table ends with sentinel entry" {
+test "MethodBuilder 方法表以哨兵条目结尾" {
     const T = struct {
         pub fn helper(a: i32) i32 {
             return a;
@@ -341,24 +336,24 @@ test "MethodBuilder table ends with sentinel entry" {
     };
     const M = MethodBuilder(T);
     const table = comptime M.buildMethodTable();
-    // 1 method + 1 sentinel.
+    // 1 个方法 + 1 个哨兵。
     try testing.expectEqual(@as(usize, 2), table.len);
-    // Sentinel: null name, null meth, zero flags.
+    // 哨兵：null 名称、null 方法指针、零标志。
     try testing.expect(table[1].ml_name == null);
     try testing.expect(table[1].ml_meth == null);
     try testing.expectEqual(@as(c_int, 0), table[1].ml_flags);
 }
 
-test "MethodBuilder distinguishes instance from static by first param" {
+test "MethodBuilder 通过第一个参数区分实例和静态方法" {
     const T = struct {
         value: i32 = 0,
 
-        // First param is *@This() -> instance method.
+        // 第一个参数是 *@This() -> 实例方法。
         pub fn inst(self: *@This()) i32 {
             return self.value;
         }
 
-        // First param is not *@This() -> static method.
+        // 第一个参数不是 *@This() -> 静态方法。
         pub fn stat(a: i32) i32 {
             return a;
         }
@@ -368,14 +363,14 @@ test "MethodBuilder distinguishes instance from static by first param" {
     try testing.expectEqual(@as(usize, 1), M.static_method_count);
 }
 
-test "MethodBuilder respects __pymz_class_methods__ override" {
+test "MethodBuilder 尊重 pymz_meta.class_methods 覆盖" {
     const T = struct {
-        pub const __pymz_class_methods__ = .{
-            .marked = true,
+        pub const pymz_meta = .{
+            .class_methods = .{ .marked = true },
         };
 
-        // Even though the first param looks like an instance param (*@This()),
-        // __pymz_class_methods__ overrides it to be a class method.
+        // 即使第一个参数看起来像实例参数（*@This()），
+        // pymz_meta.class_methods 将其覆盖为类方法。
         pub fn marked(self: *@This()) i32 {
             return @intFromPtr(self);
         }
@@ -385,7 +380,7 @@ test "MethodBuilder respects __pymz_class_methods__ override" {
     try testing.expectEqual(@as(usize, 1), M.class_method_count);
 }
 
-test "MethodBuilder excludes handled dunders from instance count" {
+test "MethodBuilder 从实例计数中排除已处理的 dunder" {
     const T = struct {
         pub fn __repr__(self: *const @This()) []const u8 {
             _ = self;
@@ -396,11 +391,11 @@ test "MethodBuilder excludes handled dunders from instance count" {
         }
     };
     const M = MethodBuilder(T);
-    // __repr__ is excluded (handled by ReprBuilder), only normalMethod counts.
+    // __repr__ 被排除（由 ReprBuilder 处理），只有 normalMethod 计入。
     try testing.expectEqual(@as(usize, 1), M.instance_method_count);
 }
 
-test "isByteSlice identifies string literal types" {
+test "isByteSlice 识别字符串字面量类型" {
     try testing.expect(isByteSlice([]const u8));
     try testing.expect(isByteSlice([]u8));
     try testing.expect(!isByteSlice(i32));

@@ -8,7 +8,7 @@
 
 | 工具 | 版本 | 备注 |
 | --- | --- | --- |
-| [Zig](https://ziglang.org) | `0.16.0-dev.2979+e93834410` | CI 固定此版本；建议用 `zigup` 管理。 |
+| [Zig](https://ziglang.org) | `0.16.0` | 建议用 `zigup` 管理。 |
 | Python | 3.8+ | 用于 PEP 517、loader 和端到端测试。 |
 | `setuptools` | ≥ 61 | `pymz-tool` Python 集成包的构建依赖。 |
 | `pytest` | ≥ 6 | 跑 Python 测试。 |
@@ -26,13 +26,13 @@ python -m pip install -e pymz-tool pytest
 ```
 pymz/                 # Zig 绑定核心、后端契约和公共 API 包
 pymz-tool/            # 纯 Python PEP 517 + CLI + loader + setuptools 集成，以及可复用的 Zig 构建核心
-pymz-tool/src/core/   # 可复用的 Zig 构建核心
+pymz-tool/src/         # 可复用的 Zig 构建核心
 pymz-tool/python/     # PEP 517、loader 和 setuptools 集成
 examples/jsonz/       # 完整参考示例
 ```
 
-请阅读 [README 的项目结构章节](README.md#项目结构) 获取每个目录的详细
-职责说明。
+请阅读 [README 的项目理念章节](README.md#项目理念) 了解 pymz 的
+整体设计目标与多版本、多平台策略。
 
 ## 3. 开发工作流
 

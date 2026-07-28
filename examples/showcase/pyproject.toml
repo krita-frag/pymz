@@ -1,0 +1,10 @@
+[build-system]
+requires = ["pymz-tool"]
+build-backend = "pymz_tool"
+
+[project]
+name = "showcase"
+version = "0.1.0"
+description = "pymz feature showcase: classes, GC, protocols, inheritance, containers"
+requires-python = ">=3.8"
+dependencies = ["pymz-tool"]

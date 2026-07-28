@@ -27,6 +27,8 @@ build/
 .direnv/
 result
 result-*
+.pymz-bin/
+pymz-manifest.json
 
 # Stray build artifacts
 envcheck.o

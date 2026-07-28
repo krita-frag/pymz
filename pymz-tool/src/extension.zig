@@ -5,11 +5,10 @@ pub const PythonConfig = python_config.PythonConfig;
 pub const Runtime = python_config.Runtime;
 pub const runtimeIsLimitedApi = python_config.runtimeIsLimitedApi;
 
-/// Context passed to `BuildHooks` callbacks.
+/// 传递给 `BuildHooks` 回调的上下文。
 ///
-/// Gives the project's `build.zig` enough information to perform custom
-/// linking, add C source files, or attach additional build steps without
-/// reaching into pymz internals.
+/// 为项目的 `build.zig` 提供足够信息以执行自定义链接、添加 C 源文件或附加额外构建步骤，
+/// 无需深入 pymz 内部。
 pub const HookContext = struct {
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -18,17 +17,14 @@ pub const HookContext = struct {
     runtime: Runtime,
 };
 
-/// Hooks that let a project's `build.zig` customize the extension module and
-/// artifact after pymz has created them.
+/// 钩子，允许项目的 `build.zig` 在 pymz 创建扩展模块和产物后进行自定义。
 ///
-/// `configure_module` is called after the root module is created and the
-/// Python include/link paths are wired, but before the shared library is
-/// instantiated. Use it to call `module.linkSystemLibrary`,
-/// `module.addCSourceFile`, `module.addIncludePath`, etc.
+/// `configure_module` 在根模块创建且 Python 包含/链接路径已连接后调用，
+/// 但在共享库实例化之前。用于调用 `module.linkSystemLibrary`、
+/// `module.addCSourceFile`、`module.addIncludePath` 等。
 ///
-/// `configure_artifact` is called after `addLibrary` returns the
-/// `*std.Build.Step.Compile`. Use it to call `artifact.dependOn`,
-/// `artifact.installHeader`, etc.
+/// `configure_artifact` 在 `addLibrary` 返回 `*std.Build.Step.Compile` 后调用。
+/// 用于调用 `artifact.dependOn`、`artifact.installHeader` 等。
 pub const BuildHooks = struct {
     configure_module: ?*const fn (
         module: *std.Build.Module,
@@ -41,7 +37,7 @@ pub const BuildHooks = struct {
     ) void = null,
 };
 
-/// Options for adding a Python extension artifact.
+/// 添加 Python 扩展产物的选项。
 pub const ExtensionOptions = struct {
     name: []const u8,
     root_source_file: std.Build.LazyPath,
@@ -55,13 +51,11 @@ pub const ExtensionOptions = struct {
     hooks: BuildHooks = .{},
 };
 
-/// Compute the platform-specific extension filename using the discovered
-/// `ext_suffix` from the target Python interpreter.
+/// 使用目标 Python 解释器发现的 `ext_suffix` 计算平台特定的扩展文件名。
 ///
-/// For stable-ABI (`cpython3-limited`) runtimes the suffix is forced to
-/// `.abi3.so` (or `.abi3.pyd` on Windows) regardless of the host interpreter's
-/// `ext_suffix`, which typically reports a versioned tag like
-/// `.cpython-310-x86_64-linux-gnu.so`.
+/// 对于稳定 ABI（`cpython3-limited`）运行环境，后缀强制为 `.abi3.so`
+///（Windows 上为 `.abi3.pyd`），无论主机解释器的 `ext_suffix` 是什么，
+/// 后者通常报告带版本标签的名称，如 `.cpython-310-x86_64-linux-gnu.so`。
 pub fn computeExtensionName(
     allocator: std.mem.Allocator,
     name: []const u8,
@@ -76,9 +70,8 @@ pub fn computeExtensionName(
     return std.mem.concatWithSentinel(allocator, u8, &.{ name, py.ext_suffix }, 0);
 }
 
-/// Parse a whitespace-separated string of linker flags (`-L`, `-framework`,
-/// `-l`) and apply them to `module`. Flags that are redundant on the target
-/// platform are skipped (e.g. `CoreFoundation` and `intl` on macOS).
+/// 解析以空白分隔的链接器标志字符串（`-L`、`-framework`、`-l`）并将其应用于 `module`。
+/// 跳过目标平台上冗余的标志（例如 macOS 上的 `CoreFoundation` 和 `intl`）。
 fn applyLinkerFlags(
     module: *std.Build.Module,
     flags: []const u8,
@@ -102,7 +95,7 @@ fn applyLinkerFlags(
     }
 }
 
-/// Add a Python extension shared library to the build.
+/// 向构建中添加 Python 扩展共享库。
 pub fn addPythonExtension(
     b: *std.Build,
     options: ExtensionOptions,
@@ -124,12 +117,12 @@ pub fn addPythonExtension(
     });
     lib.root_module.link_libc = true;
 
-    // Windows import library for linking against pythonXY.dll.
+    // 用于链接 pythonXY.dll 的 Windows 导入库。
     if (options.windows_import_lib) |import_lib| {
         lib.root_module.addObjectFile(import_lib);
     }
 
-    // Python include paths.
+    // Python 包含路径。
     var include_it = std.mem.tokenizeScalar(u8, options.py.includes, ' ');
     while (include_it.next()) |flag| {
         if (std.mem.startsWith(u8, flag, "-I")) {
@@ -138,14 +131,13 @@ pub fn addPythonExtension(
         }
     }
 
-    // Python linker flags (both ldflags and libs use the same flag syntax).
+    // Python 链接器标志（ldflags 和 libs 使用相同的标志语法）。
     const os_tag = options.target.result.os.tag;
     applyLinkerFlags(module, options.py.ldflags, os_tag);
     applyLinkerFlags(module, options.py.libs, os_tag);
 
-    // macOS framework Python: infer the Frameworks directory from the first
-    // include path and link Python.framework directly when no explicit -l
-    // library was provided.
+    // macOS framework Python：从第一个包含路径推断 Frameworks 目录，
+    // 并在未提供显式 -l 库时直接链接 Python.framework。
     if (os_tag == .macos) {
         var it = std.mem.tokenizeScalar(u8, options.py.includes, ' ');
         if (it.next()) |first_flag| {
@@ -165,8 +157,8 @@ pub fn addPythonExtension(
         }
     }
 
-    // Invoke project-supplied hooks so build.zig can add extra C sources,
-    // link additional libraries, or attach install steps.
+    // 调用项目提供的钩子，以便 build.zig 可以添加额外的 C 源文件、
+    // 链接额外的库或附加安装步骤。
     const ctx: HookContext = .{
         .b = b,
         .target = options.target,
@@ -184,24 +176,22 @@ pub fn addPythonExtension(
     return lib;
 }
 
-/// Add the backend runtime option shared by all backend implementations.
+/// 添加所有后端实现共享的后端运行环境选项。
 pub fn configureBackendModule(module: *std.Build.Module, runtime: Runtime) void {
     const options = module.owner.addOptions();
     options.addOption([]const u8, "runtime", runtime.toString());
-    // `is_limited_api` is delivered as a build option so the runtime's
-    // `limiter.zig` can read it without importing the backend module or any
-    // cross-module file (which would conflict under Zig 0.16's single-owner
-    // file rule).
+    // `is_limited_api` 作为构建选项传递，以便运行环境的 `limiter.zig`
+    // 可以读取它而无需导入后端模块或任何跨模块文件
+    //（在 Zig 0.16 的单所有者文件规则下会导致冲突）。
     options.addOption(bool, "is_limited_api", runtime.isLimitedApi());
     module.addOptions("pymz_options", options);
 }
 
-/// Configure the built-in CPython backend with translated C API headers.
+/// 使用翻译后的 C API 头文件配置内置的 CPython 后端。
 ///
-/// `python_c_header` is the path to the C header used by `addTranslateC`.
-/// `compat_include_dir` is an additional include directory for compatibility
-/// shims. Both paths are supplied by the caller so that `pymz-tool/core` does not
-/// need to know the `pymz` package's internal file layout.
+/// `python_c_header` 是 `addTranslateC` 使用的 C 头文件路径。
+/// `compat_include_dir` 是兼容性垫片的额外包含目录。
+/// 两个路径均由调用者提供，以便 `pymz-tool/core` 无需知道 `pymz` 包的内部文件布局。
 pub fn configureCpythonBackendModule(
     module: *std.Build.Module,
     py: PythonConfig,
@@ -244,7 +234,7 @@ pub fn configureCpythonBackendModule(
     module.addImport("python_c", translate_c.createModule());
 }
 
-/// Configure a custom backend module that does not need the CPython C API.
+/// 配置不需要 CPython C API 的自定义后端模块。
 pub fn configureBackendModuleFromDependency(
     module: *std.Build.Module,
     runtime: Runtime,
@@ -252,11 +242,10 @@ pub fn configureBackendModuleFromDependency(
     configureBackendModule(module, runtime);
 }
 
-/// Create the `pymz_backend` implementation module.
+/// 创建 `pymz_backend` 实现模块。
 ///
-/// `contract_file` is the backend contract file (typically `pymz/src/contract.zig`).
-/// It is passed as a `LazyPath` so that `pymz-tool/core` does not depend on the
-/// `pymz` package's directory structure.
+/// `contract_file` 是后端契约文件（通常为 `pymz/src/contract.zig`）。
+/// 它以 `LazyPath` 形式传递，以便 `pymz-tool/core` 不依赖 `pymz` 包的目录结构。
 pub fn createBackendModule(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -276,10 +265,9 @@ pub fn createBackendModule(
         .optimize = optimize,
     });
     backend_impl.addImport("pymz_core", pymz_core_module);
-    // Share the single `pymz_contract` module instance (rooted at
-    // `contract.zig`) with the `pymz` module so `contract.zig` is owned by
-    // exactly one module and can be referenced from both `pymz.zig` and
-    // `backend.zig` without a multi-module file-ownership conflict.
+    // 与 `pymz` 模块共享单个 `pymz_contract` 模块实例（根植于 `contract.zig`），
+    // 使 `contract.zig` 恰好被一个模块拥有，
+    // 且可以从 `pymz.zig` 和 `backend.zig` 两者引用而不会产生多模块文件所有权冲突。
     backend_impl.addImport("pymz_contract", contract_module);
     if (use_cpython_backend) {
         configureCpythonBackendModule(
@@ -295,11 +283,10 @@ pub fn createBackendModule(
     return backend_impl;
 }
 
-/// Create the public `pymz` module.
+/// 创建公共 `pymz` 模块。
 ///
-/// `root_file` is the package root (typically `pymz/src/pymz.zig`). It is
-/// passed as a `LazyPath` so that `pymz-tool/core` does not depend on the `pymz`
-/// package's directory structure.
+/// `root_file` 是包的根文件（通常为 `pymz/src/pymz.zig`）。
+/// 它以 `LazyPath` 形式传递，以便 `pymz-tool/core` 不依赖 `pymz` 包的目录结构。
 pub fn createPymzModule(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -313,13 +300,11 @@ pub fn createPymzModule(
         .target = target,
         .optimize = optimize,
     });
-    // The backend module already exports BackendSpec, backendSpec(), Backend(),
-    // etc. via the selected backend source. Re-export it directly as
-    // `pymz_backend` instead of generating an intermediate wrapper file.
+    // 后端模块已通过所选后端源导出 BackendSpec、backendSpec()、Backend() 等。
+    // 直接将其重新导出为 `pymz_backend`，而不是生成中间包装文件。
     module.addImport("pymz_backend", backend_module);
-    // `pymz.zig` references the contract types via the same `pymz_contract`
-    // module instance shared with the backend module, so `contract.zig` is
-    // owned by exactly one module.
+    // `pymz.zig` 通过与后端模块共享的同一个 `pymz_contract` 模块实例引用契约类型，
+    // 因此 `contract.zig` 恰好被一个模块拥有。
     module.addImport("pymz_contract", contract_module);
     return module;
 }

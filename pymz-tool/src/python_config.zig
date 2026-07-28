@@ -1,18 +1,17 @@
-//! Python interpreter detection and runtime identifier helpers.
+//! Python 解释器检测和运行环境标识符辅助工具。
 
 const std = @import("std");
 const pymz = @import("pymz");
 
-/// Strongly-typed identifier for a supported Python-family runtime.
+/// 受支持的 Python 家族运行环境的强类型标识符。
 ///
-/// Re-exported from `pymz` so the runtime contract and build logic share a
-/// single source of truth.
+/// 从 `pymz` 重新导出，使运行环境契约和构建逻辑共享单一真相源。
 pub const RuntimeId = pymz.RuntimeId;
 
-/// Backward-compatible alias for the strongly-typed runtime identifier.
+/// 强类型运行环境标识符的向后兼容别名。
 pub const Runtime = RuntimeId;
 
-/// Detected Python interpreter configuration used to configure compilation.
+/// 检测到的用于配置编译的 Python 解释器配置。
 pub const PythonConfig = struct {
     version: []const u8,
     major: u32,
@@ -24,69 +23,69 @@ pub const PythonConfig = struct {
     ext_suffix: []const u8,
 };
 
-/// Detected Python version tuple.
+/// 检测到的 Python 版本元组。
 pub const PythonVersion = struct {
     version: []const u8,
     major: u32,
     minor: u32,
 };
 
-/// Build-option-driven overrides for Python configuration.
+/// 构建选项驱动的 Python 配置覆盖。
 ///
-/// The tool passes these via ``-D`` build options; ``build.zig`` authors can
-/// set them directly. When a field is non-null it takes precedence over both
-/// environment variables and ``python-config`` discovery.
+/// 工具通过 `-D` 构建选项传递这些值；`build.zig` 作者可以直接设置它们。
+/// 当字段非 null 时，它优先于环境变量和 `python-config` 发现。
 pub const PythonOverrides = struct {
-    /// Path to the ``python-config`` script.
+    /// `python-config` 脚本的路径。
     config: ?[]const u8 = null,
-    /// Raw include flags, e.g. ``-I/usr/include/python3.12``.
+    /// 原始包含标志，例如 `-I/usr/include/python3.12`。
     includes: ?[]const u8 = null,
-    /// Raw linker flags, e.g. ``-L/usr/lib -lpython3.12``.
+    /// 原始链接器标志，例如 `-L/usr/lib -lpython3.12`。
     ldflags: ?[]const u8 = null,
-    /// Raw library flags.
+    /// 原始库标志。
     libs: ?[]const u8 = null,
-    /// Extension suffix, e.g. ``.cpython-312-darwin.so``.
+    /// 扩展后缀，例如 `.cpython-312-darwin.so`。
     ext_suffix: ?[]const u8 = null,
-    /// Python version string (e.g. ``3.12``) used when synthesising a config
-    /// from raw flags.
+    /// Python 版本字符串（例如 `3.12`），用于从原始标志合成配置时使用。
     version: ?[]const u8 = null,
 
-    /// Fill any null field from its corresponding ``PYMZ_PYTHON_*`` environment
-    /// variable. This realises the documented precedence
-    /// ``-D option > env var > python-config``: callers populate the struct
-    /// from ``-D`` options first, then call this to pick up env-var fallbacks
-    /// for any field the user did not pin on the command line. Only fields that
-    /// are still ``null`` are read from the environment, so an explicit
-    /// ``-Dpymz-python-includes`` always wins over ``PYMZ_PYTHON_INCLUDES``.
-    pub fn fillFromEnv(self: PythonOverrides) PythonOverrides {
+    /// 从对应的 `PYMZ_PYTHON_*` 环境变量填充任何 null 字段。
+    /// 实现文档中记录的优先级 `-D 选项 > 环境变量 > python-config`：
+    /// 调用者先填充来自 `-D` 选项的字段，然后调用此方法为任何未在命令行上固定的字段拾取环境变量回退。
+    /// 仅读取仍为 `null` 的字段的环境变量，因此显式的 `-Dpymz-python-includes` 始终优先于 `PYMZ_PYTHON_INCLUDES`。
+    ///
+    /// 通过 `b.graph.environ_map` 读取环境变量，避免在 Windows 构建脚本上引入 libc
+    /// 依赖（`std.c.getenv` 要求显式链接 libc，而构建脚本默认不链接）。
+    pub fn fillFromEnv(self: PythonOverrides, b: *std.Build) PythonOverrides {
         var out = self;
-        if (out.config == null) out.config = envOpt("PYMZ_PYTHON_CONFIG");
-        if (out.includes == null) out.includes = envOpt("PYMZ_PYTHON_INCLUDES");
-        if (out.ldflags == null) out.ldflags = envOpt("PYMZ_PYTHON_LDFLAGS");
-        if (out.libs == null) out.libs = envOpt("PYMZ_PYTHON_LIBS");
-        if (out.ext_suffix == null) out.ext_suffix = envOpt("PYMZ_PYTHON_EXT_SUFFIX");
-        if (out.version == null) out.version = envOpt("PYMZ_PYTHON_VERSION");
+        if (out.config == null) out.config = envOpt(b, "PYMZ_PYTHON_CONFIG");
+        if (out.includes == null) out.includes = envOpt(b, "PYMZ_PYTHON_INCLUDES");
+        if (out.ldflags == null) out.ldflags = envOpt(b, "PYMZ_PYTHON_LDFLAGS");
+        if (out.libs == null) out.libs = envOpt(b, "PYMZ_PYTHON_LIBS");
+        if (out.ext_suffix == null) out.ext_suffix = envOpt(b, "PYMZ_PYTHON_EXT_SUFFIX");
+        if (out.version == null) out.version = envOpt(b, "PYMZ_PYTHON_VERSION");
         return out;
     }
 };
 
-/// Read an optional ``[*:0]const u8`` environment variable into an owned
-/// ``[]const u8`` slice, returning ``null`` when unset. The pointer returned
-/// by ``getenv`` is process-owned and stable, so no copy is needed.
-fn envOpt(name: [:0]const u8) ?[]const u8 {
-    const value = std.c.getenv(name) orelse return null;
-    const spanned = std.mem.span(value);
-    if (spanned.len == 0) return null;
-    return spanned;
+/// 读取可选的环境变量为借用的 `[]const u8` 切片，未设置或为空时返回 `null`。
+///
+/// 通过 `b.graph.environ_map` 读取（Zig 0.16 构建脚本的环境映射），而非
+/// `std.c.getenv`。后者要求构建脚本显式链接 libc，在 Windows 上默认不链接，
+/// 会导致 "dependency on libc must be explicitly specified" 错误。
+/// `environ_map` 是构建运行器在启动时填充的进程级映射，返回的切片由映射拥有，
+/// 生命周期与构建进程一致，因此可安全借用。
+fn envOpt(b: *std.Build, name: []const u8) ?[]const u8 {
+    const value = b.graph.environ_map.get(name) orelse return null;
+    if (value.len == 0) return null;
+    return value;
 }
 
 pub fn runtimeIsLimitedApi(runtime: RuntimeId) bool {
     return runtime.isLimitedApi();
 }
 
-/// String-accepting variant for callers (e.g. wheel building) that hold the
-/// runtime as a manifest string. Invalid runtime names are treated as
-/// non-limited, matching the historical `runtimeIsAbi3` behavior.
+/// 接受字符串的变体，供将运行环境作为清单字符串持有的调用者使用（例如 wheel 构建）。
+/// 无效的运行环境名称被视为非 limited，与历史 `runtimeIsAbi3` 行为一致。
 pub fn runtimeIsLimitedApiByName(runtime: []const u8) bool {
     const id = RuntimeId.fromString(runtime) catch return false;
     return runtimeIsLimitedApi(id);
@@ -110,12 +109,10 @@ pub fn resolveRuntime(requested: []const u8, py: PythonConfig) !Runtime {
     return runtime;
 }
 
-/// Locate the default python-config executable for the host environment.
+/// 为主机环境定位默认的 python-config 可执行文件。
 ///
-/// When ``overrides`` supplies all raw cross-compilation fields
-/// (includes/ldflags/libs/ext_suffix/version), a sentinel string is returned
-/// so that `discoverPythonConfig` can synthesise the config without invoking
-/// a host interpreter.
+/// 当 `overrides` 提供了所有原始交叉编译字段（includes/ldflags/libs/ext_suffix/version）时，
+/// 返回一个哨兵字符串，以便 `discoverPythonConfig` 可以合成配置而无需调用主机解释器。
 pub fn resolveDefaultPythonConfig(
     b: *std.Build,
     overrides: PythonOverrides,
@@ -131,12 +128,11 @@ pub fn resolveDefaultPythonConfig(
         return error.PythonConfigNotFound;
     }
 
-    // Fallback: read the ``PYMZ_PYTHON_CONFIG`` env var when no build option
-    // or config file supplies a python-config path. Direct ``zig build``
-    // invocations use it to locate a script.
-    if (std.c.getenv("PYMZ_PYTHON_CONFIG")) |cfg| {
+    // 回退：当没有构建选项或配置文件提供 python-config 路径时，读取 `PYMZ_PYTHON_CONFIG` 环境变量。
+    // 直接 `zig build` 调用使用它来定位脚本。
+    if (b.graph.environ_map.get("PYMZ_PYTHON_CONFIG")) |cfg| {
         warnEnvVarFallback("PYMZ_PYTHON_CONFIG", "-Dpymz-python-config");
-        if (try resolvePythonConfigFromEnvCandidates(b, std.mem.span(cfg), null)) |candidate| {
+        if (try resolvePythonConfigFromEnvCandidates(b, cfg, null)) |candidate| {
             return candidate;
         }
         return error.PythonConfigNotFound;
@@ -175,14 +171,12 @@ pub fn resolvePythonConfigExact(
         return error.PythonConfigNotFound;
     }
 
-    // Fallback: read the version-pinned ``PYMZ_PYTHON_CONFIG_{version}`` env
-    // var when no build option or config file supplies a path.
-    const env_name = b.fmt("PYMZ_PYTHON_CONFIG_{s}\x00", .{version});
-    if (std.c.getenv(@ptrCast(env_name.ptr))) |cfg| {
-        warnEnvVarFallback(env_name[0 .. env_name.len - 1], "-Dpymz-python-config");
-        const candidate = std.mem.span(cfg);
-        if (candidate.len == 0) return error.PythonConfigNotFound;
-        if (try resolvePythonConfigFromEnvCandidates(b, candidate, version)) |ok| return ok;
+    // 回退：当没有构建选项或配置文件提供路径时，读取版本固定的 `PYMZ_PYTHON_CONFIG_{version}` 环境变量。
+    const env_name = b.fmt("PYMZ_PYTHON_CONFIG_{s}", .{version});
+    if (b.graph.environ_map.get(env_name)) |cfg| {
+        warnEnvVarFallback(env_name, "-Dpymz-python-config");
+        if (cfg.len == 0) return error.PythonConfigNotFound;
+        if (try resolvePythonConfigFromEnvCandidates(b, cfg, version)) |ok| return ok;
         return error.PythonConfigNotFound;
     }
 
@@ -236,23 +230,20 @@ fn resolvePythonConfigFromEnvCandidates(
     return null;
 }
 
-/// Derive the Python interpreter binary path from a `python-config` script
-/// path by stripping the `-config` suffix. If the input does not end with
-/// `-config`, it is returned unchanged.
+/// 从 `python-config` 脚本路径推导 Python 解释器二进制路径，通过去掉 `-config` 后缀。
+/// 如果输入不以 `-config` 结尾，则原样返回。
 fn interpreterFromConfig(config: []const u8) []const u8 {
     if (std.mem.endsWith(u8, config, "-config"))
         return config[0 .. config.len - "-config".len];
     return config;
 }
 
-/// Run a small probe script via the Python interpreter derived from `config`.
+/// 通过从 `config` 派生的 Python 解释器运行一个小型探测脚本。
 ///
-/// This is the universal alternative to `python-config --version` /
-/// `--extension-suffix`, both of which are unavailable on CPython 2.7 (the
-/// flags do not exist) and 3.14+ (`--version` was removed). The interpreter
-/// probe works on every supported CPython: `python -c` is stable and writes to
-/// stdout on both Python 2 and 3, unlike `python --version` which goes to
-/// stderr on Python 2 and so cannot be captured uniformly.
+/// 这是 `python-config --version` / `--extension-suffix` 的通用替代方案，
+/// 这两个标志在 CPython 2.7 上不可用（标志不存在）且在 3.14+ 上被移除（`--version`）。
+/// 解释器探测在所有受支持的 CPython 上都能工作：`python -c` 是稳定的，且在 Python 2 和 3 上都写入 stdout，
+/// 而 `python --version` 在 Python 2 上写入 stderr，因此无法统一捕获。
 fn runInterpreterProbe(
     b: *std.Build,
     config: []const u8,
@@ -270,10 +261,10 @@ fn runInterpreterProbe(
     return result.stdout;
 }
 
-/// Verify that the interpreter backing `config` matches `expected_version`.
+/// 验证 `config` 背后的解释器是否匹配 `expected_version`。
 ///
-/// Uses the universal `sys.version_info` probe instead of `python-config
-/// --version`, which is missing on CPython 2.7 and removed in 3.14+.
+/// 使用通用的 `sys.version_info` 探测，而非 `python-config --version`，
+/// 后者在 CPython 2.7 上不存在且在 3.14+ 上被移除。
 fn checkPythonConfigVersion(
     b: *std.Build,
     config: []const u8,
@@ -289,11 +280,9 @@ fn checkPythonConfigVersion(
     return std.mem.eql(u8, v, expected_version);
 }
 
-/// Synthesise a `PythonConfig` from explicit override values. Returns `null`
-/// when the overrides do not include enough fields to bypass `python-config`.
+/// 从显式的覆盖值合成 `PythonConfig`。当覆盖值不包含足够的字段来绕过 `python-config` 时返回 `null`。
 ///
-/// The required fields are: `includes`, `ldflags`, `ext_suffix`, and
-/// `version` (or `libs` as a fallback for the linker set).
+/// 必需的字段为：`includes`、`ldflags`、`ext_suffix` 和 `version`（或 `libs` 作为链接器集的回退）。
 fn synthesizeFromOverrides(
     b: *std.Build,
     overrides: PythonOverrides,
@@ -346,9 +335,8 @@ pub fn discoverPythonConfig(
 ) !PythonConfig {
     if (synthesizeFromOverrides(b, overrides, "")) |py| return py;
 
-    // Determine the version via the universal interpreter probe (see
-    // `runInterpreterProbe`), which works across CPython 2.7 and 3.x
-    // including 3.14+ where `python-config --version` was removed.
+    // 通过通用的解释器探测确定版本（见 `runInterpreterProbe`），
+    // 它在 CPython 2.7 和 3.x（包括 3.14+，其中 `python-config --version` 已被移除）上都能工作。
     const version = blk: {
         const vout = runInterpreterProbe(
             b,
@@ -365,10 +353,9 @@ pub fn discoverPythonConfig(
     const includes = try runPythonConfig(b, argv_includes);
     errdefer b.allocator.free(includes);
 
-    // Python 3.8+ deprecated embedded module linking in plain `--ldflags`.
-    // Python 3.14 completely removed `-lpython` from `--ldflags` output,
-    // so we try `--embed` first (Python 3.8+) and fall back to plain
-    // `--ldflags` for older interpreters.
+    // Python 3.8+ 弃用了在普通 `--ldflags` 中嵌入模块链接。
+    // Python 3.14 完全从 `--ldflags` 输出中移除了 `-lpython`，
+    // 因此我们首先尝试 `--embed`（Python 3.8+），对于较旧的解释器回退到普通 `--ldflags`。
     const argv_ldflags: []const []const u8 = if (parsed.major > 3 or (parsed.major == 3 and parsed.minor >= 8))
         &.{ config, "--ldflags", "--embed" }
     else
@@ -377,7 +364,7 @@ pub fn discoverPythonConfig(
         if (runPythonConfig(b, argv_ldflags)) |out| {
             break :blk out;
         } else |_| {
-            // Fallback: --embed not supported (Python < 3.8).
+            // 回退：--embed 不受支持（Python < 3.8）。
             break :blk try runPythonConfig(b, &.{ config, "--ldflags" });
         }
     };
@@ -387,10 +374,9 @@ pub fn discoverPythonConfig(
     const libs = try runPythonConfig(b, argv_libs);
     errdefer b.allocator.free(libs);
 
-    // `python-config --extension-suffix` is unavailable on CPython 2.7. Query
-    // the interpreter directly (EXT_SUFFIX on 3.x, SO on 2.7) and fall back to
-    // `--extension-suffix` for environments where the interpreter cannot run
-    // (e.g. cross-compile with only the config script available).
+    // `python-config --extension-suffix` 在 CPython 2.7 上不可用。
+    // 直接查询解释器（3.x 上用 EXT_SUFFIX，2.7 上用 SO），
+    // 在无法运行解释器的环境中（例如只有配置脚本可用的交叉编译）回退到 `--extension-suffix`。
     const ext_suffix = blk: {
         const sout = runInterpreterProbe(
             b,

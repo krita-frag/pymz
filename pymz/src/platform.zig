@@ -1,16 +1,13 @@
-//! Public platform surface re-exported as `pymz.platform`.
+//! 公共平台表层，作为 `pymz.platform` 重新导出。
 //!
-//! Exposes `is_limited()` / `is_limited_api` for end-user code (e.g. a project
-//! gating behavior on whether pymz was built against the stable ABI). The
-//! value is derived from the active backend's `backendSpec().capabilities`
-//! via the `pymz_backend` module.
+//! 为终端用户代码暴露 `is_limited()` / `is_limited_api`（例如项目根据 pymz
+//! 是否针对稳定 ABI 构建来切换行为）。该值通过 `pymz_backend` 模块从活跃
+//! 后端的 `backendSpec().capabilities` 派生。
 //!
-//! The runtime-internal `isActiveForPlatform` and `is_limited_api` consumed by
-//! the declarative descriptors live in `runtime/cpython/limiter.zig` instead,
-//! driven by the `pymz_options` build flag. Keeping the two surfaces separate
-//! avoids a cross-module file import that would conflict under Zig 0.16's
-//! single-owner file rule (the runtime files belong to the `pymz_backend`
-//! module; this file belongs to the `pymz` module).
+//! 声明式描述符内部使用的 `isActiveForPlatform` 和 `is_limited_api` 位于
+//! `runtime/cpython/limiter.zig` 中，由 `pymz_options` 构建标志驱动。
+//! 将两个表层分开可避免跨模块文件导入，这在 Zig 0.16 的单文件拥有者规则下
+//! 会导致冲突（运行时文件属于 `pymz_backend` 模块，本文件属于 `pymz` 模块）。
 
 const backend = @import("pymz_backend");
 
@@ -18,7 +15,7 @@ const spec = backend.backendSpec();
 
 pub const is_limited_api: bool = spec.capabilities.stable_abi;
 
-/// True when the active backend targets the stable (limited) CPython ABI.
+/// 活跃后端是否针对稳定（有限）CPython ABI。
 pub fn is_limited() bool {
     return is_limited_api;
 }

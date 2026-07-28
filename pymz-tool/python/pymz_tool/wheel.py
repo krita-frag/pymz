@@ -1,6 +1,6 @@
-"""Wheel packaging for pymz extensions.
+"""pymz 扩展的 Wheel 打包。
 
-Builds PEP 427-compatible wheels using the standard library ``zipfile`` module.
+使用标准库 ``zipfile`` 模块构建符合 PEP 427 的 wheel。
 """
 from __future__ import absolute_import
 
@@ -12,8 +12,10 @@ import sysconfig
 import zipfile
 
 from ._compat import Any  # noqa: F401
-
+from .errors import PymzBuildError
 from .manifest import MANIFEST_FILENAME
+
+__all__ = ["build_wheel", "build_editable_wheel"]
 
 
 def _hash_and_size(data):
@@ -24,12 +26,12 @@ def _hash_and_size(data):
 
 def _normalize_platform_tag(tag):
     # type: (str) -> str
-    return tag.replace("-", "_").replace(".", "_")
+    return tag.replace("-", "_").replace(".", "_").replace("+", "_")
 
 
 def _wheel_platform_tag(manifest):
     # type: (dict) -> str
-    """Determine the platform tag for the wheel."""
+    """确定 wheel 的平台标签。"""
     if manifest.get("platform_tag"):
         return _normalize_platform_tag(manifest["platform_tag"])
     try:
@@ -48,7 +50,7 @@ def _runtime_is_abi3(runtime):
 
 def _extension_digits(module, filename):
     # type: (str, str) -> str | None
-    """Extract the cpython-XY digits or 'abi3' from an extension filename."""
+    """从扩展文件名中提取 cpython-XY 数字或 'abi3'。"""
     prefix = module + ".cpython-"
     if filename.startswith(prefix):
         rest = filename[len(prefix):]
@@ -99,13 +101,11 @@ def _record_line(arcname, data):
 
 def build_editable_wheel(wheel_dir, distribution, version, package_root):
     # type: (Any, str, str, Any) -> str
-    """Build a ``.pth``-based editable wheel that adds *package_root* to
-    ``sys.path``.
+    """构建基于 ``.pth`` 的可编辑 wheel，将 *package_root* 添加到 ``sys.path``。
 
-    The wheel carries no extension bytes; the extension is built in-place into
-    the package source tree by the caller, so the editable wheel only needs a
-    ``.pth`` entry plus the standard ``dist-info`` members. Centralising this
-    here keeps all wheel-layout logic in one module.
+    该 wheel 不携带扩展字节；扩展由调用者原地构建到包源码树中，
+    因此可编辑 wheel 只需要一个 ``.pth`` 条目加上标准的 ``dist-info`` 成员。
+    在此集中所有 wheel 布局逻辑，使其保持在一个模块中。
     """
     from pathlib import Path
     wheel_dir = Path(str(wheel_dir))
@@ -150,9 +150,9 @@ def build_editable_wheel(wheel_dir, distribution, version, package_root):
 
 def build_wheel(wheel_dir, manifest, lib_dir, root):
     # type: (Any, dict, Any, Any) -> str
-    """Build a wheel from *manifest* and artifacts in *lib_dir*.
+    """从 *manifest* 和 *lib_dir* 中的产物构建 wheel。
 
-    Returns the wheel filename.
+    返回 wheel 文件名。
     """
     wheel_dir = str(wheel_dir)
     lib_dir = str(lib_dir)
@@ -168,9 +168,9 @@ def build_wheel(wheel_dir, manifest, lib_dir, root):
 
     extensions = [a for a in manifest["artifacts"] if a["kind"] == "extension"]
     if not extensions:
-        raise RuntimeError("no extension artifact in manifest")
+        raise PymzBuildError("no extension artifact in manifest")
 
-    # Use the first extension's filename to determine ABI tags.
+    # 使用第一个扩展的文件名来确定 ABI 标签。
     ext_filename = extensions[0]["filename"]
     ext_digits = _extension_digits(module, ext_filename)
 
@@ -186,7 +186,7 @@ def build_wheel(wheel_dir, manifest, lib_dir, root):
     records = []  # type: list
 
     with zipfile.ZipFile(wheel_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Extension artifacts and stubs.
+        # 扩展产物和存根。
         for artifact in manifest["artifacts"]:
             src = os.path.join(lib_dir, artifact["filename"])
             if not os.path.isfile(src):
@@ -196,7 +196,7 @@ def build_wheel(wheel_dir, manifest, lib_dir, root):
             zf.writestr(arcname, data)
             records.append(_record_line(arcname, data))
 
-        # Python source files from package_dir.
+        # 来自 package_dir 的 Python 源文件。
         if package_dir:
             pkg_root = os.path.join(root, package_dir, distribution)
             if os.path.isdir(pkg_root):
@@ -214,7 +214,7 @@ def build_wheel(wheel_dir, manifest, lib_dir, root):
                         zf.writestr(rel, data)
                         records.append(_record_line(rel, data))
 
-        # Runtime manifest (fixed archive name, beside the extension).
+        # 运行时清单（固定归档名称，位于扩展旁边）。
         manifest_data = json.dumps(manifest, indent=2).encode()
         manifest_arcname = archive_prefix + MANIFEST_FILENAME
         zf.writestr(manifest_arcname, manifest_data)
@@ -251,7 +251,7 @@ def build_wheel(wheel_dir, manifest, lib_dir, root):
         zf.writestr(wheel_arcname, wheel_data)
         records.append(_record_line(wheel_arcname, wheel_data))
 
-        # RECORD (must be last; its own entry has no hash/size).
+        # RECORD（必须是最后一个；自身条目没有哈希/大小）。
         record_arcname = dist_info + "/RECORD"
         record_lines = list(records) + ["%s,," % record_arcname]
         record_data = ("\n".join(record_lines) + "\n").encode()

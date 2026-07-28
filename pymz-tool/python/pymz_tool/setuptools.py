@@ -1,15 +1,14 @@
-"""Setuptools integration for ``setup.py``-based builds (Python 2.7 and 3).
+"""``setup.py`` 构建的 Setuptools 集成（Python 2.7 和 3）。
 
-This module provides the same build capabilities as the PEP 517 backend
-(``pymz_tool.backend``) but through the traditional ``setup.py`` interface.
-Both paths produce wheels with ``pymz-manifest.json`` so the runtime loader
-works identically.
+此模块提供与 PEP 517 后端（``pymz_tool.backend``）相同的构建能力，
+但通过传统的 ``setup.py`` 接口。两种路径都产生带有 ``pymz-manifest.json`` 的 wheel，
+因此运行时加载器的工作方式相同。
 
-Configuration split:
-- ``pymz.json``: extension module name, zig step, build matrix.
-- ``setup.py`` / ``pyproject.toml`` ``[project]``: package name, version, package_dir.
+配置划分：
+- ``pymz.json``：扩展模块名、zig 步骤、构建矩阵。
+- ``setup.py`` / ``pyproject.toml`` ``[project]``：包名、版本、package_dir。
 
-Usage in a project ``setup.py``::
+项目 ``setup.py`` 中的用法::
 
     from pymz_tool import ZigPackageSpec, build_ext_class
 
@@ -28,23 +27,31 @@ Usage in a project ``setup.py``::
         cmdclass={"build_ext": build_ext_class(spec)},
     )
 
-After ``python setup.py build_ext``, the manifest is written alongside the
-extension in ``build_lib``.  ``python setup.py bdist_wheel`` then produces a
-wheel containing the extension, stub, manifest, and Python sources.
+执行 ``python setup.py build_ext`` 后，清单会被写入扩展旁边的 ``build_lib`` 中。
+然后 ``python setup.py bdist_wheel`` 会生成一个包含扩展、存根、清单和 Python 源码的 wheel。
 """
 
-from __future__ import print_function
+from __future__ import print_function, absolute_import
 
-import glob
 import os
 import shutil
 import subprocess
 
 from setuptools.command.build_ext import build_ext as build_ext_base
 
-from ._compat import DEFAULT_RUNTIME, DEFAULT_ZIG_TARGET
+from ._compat import DEFAULT_RUNTIME, DEFAULT_ZIG_TARGET, resolve_runtime_for_manifest
 from .config import python_version_string
+from .errors import PymzBuildError
 from .manifest import build_manifest, write_manifest, collect_artifacts
+
+__all__ = [
+    "ZigPackageSpec",
+    "build_ext_class",
+    "find_generated_extension",
+    "find_generated_stub",
+    "sync_generated_artifacts",
+    "ensure_dir",
+]
 
 
 def ensure_dir(path):
@@ -53,18 +60,18 @@ def ensure_dir(path):
 
 
 class ZigPackageSpec(object):
-    """Project configuration for a Zig-backed setuptools extension.
+    """Zig 后端的 setuptools 扩展的项目配置。
 
-    Attributes:
-        root: Project root directory (absolute path).
-        package_name: Python package name (e.g. "mypkg").
-        extension_name: First extension module name (backward compat).
-        modules: List of ``{"name": ..., "zig_target": ...}`` dicts.
-        version: Project version string.
-        runtime: Target runtime ("cpython2", "cpython3", "cpython3-limited").
-        zig_step: Default zig build step name.
-        python_source_dir: Directory containing Python package sources.
-        zig_executable: Path to zig executable (default from PYMZ_ZIG env or "zig").
+    属性：
+        root: 项目根目录（绝对路径）。
+        package_name: Python 包名（例如 "mypkg"）。
+        extension_name: 第一个扩展模块名（向后兼容）。
+        modules: ``{"name": ..., "zig_target": ...}`` 字典的列表。
+        version: 项目版本字符串。
+        runtime: 目标运行环境（"cpython2"、"cpython3"、"cpython3-limited"）。
+        zig_step: 默认的 zig 构建步骤名称。
+        python_source_dir: 包含 Python 包源码的目录。
+        zig_executable: zig 可执行文件的路径（默认来自 PYMZ_ZIG 环境变量或 "zig"）。
     """
 
     def __init__(
@@ -87,7 +94,7 @@ class ZigPackageSpec(object):
         self.zig_step = zig_step
         self.python_source_dir = python_source_dir
         self.zig_executable = zig_executable or os.environ.get("PYMZ_ZIG", "zig")
-        # Multi-module support: explicit list or single-module fallback.
+        # 多模块支持：显式列表或单模块回退。
         if modules:
             self.modules = modules
         else:
@@ -95,12 +102,12 @@ class ZigPackageSpec(object):
 
     @classmethod
     def from_config(cls, root, distribution=None, version=None, package_dir=None):
-        """Create a spec from ``pymz.json`` + packaging metadata.
+        """从 ``pymz.json`` + 打包元数据创建规格。
 
-        ``pymz.json`` provides the extension module names, zig steps, and matrix.
-        Packaging metadata (distribution, version, package_dir) comes from
-        *pyproject.toml* ``[project]`` on Python 3, or from the explicit
-        keyword arguments (typically passed by ``setup.py`` on Python 2).
+        ``pymz.json`` 提供扩展模块名、zig 步骤和矩阵。
+        打包元数据（distribution、version、package_dir）来自
+        *pyproject.toml* ``[project]``（Python 3 上）或显式关键字参数
+        （通常在 Python 2 上由 ``setup.py`` 传递）。
         """
         from .config import load_config, get_project_info
         root = os.path.abspath(root)
@@ -125,9 +132,6 @@ class ZigPackageSpec(object):
             modules=modules,
         )
 
-    # Alias for backward compatibility.
-    from_pyproject = from_config
-
     @property
     def python_package_dir(self):
         return os.path.join(self.root, self.python_source_dir, self.package_name)
@@ -142,15 +146,14 @@ class ZigPackageSpec(object):
 
     @property
     def extension_names(self):
-        """List of extension module names."""
+        """扩展模块名称列表。"""
         return [m["name"] for m in self.modules]
 
     def zig_build_commands(self, python_version):
-        """Return a list of ``zig build`` commands, one per unique step.
+        """返回 ``zig build`` 命令列表，每个唯一步骤一个。
 
-        The runtime flag is omitted when it is the default (``"auto"``) so zig
-        build resolves the runtime from the detected interpreter, matching
-        ``matrix.run_zig_build``.
+        当运行环境为默认值（``"auto"``）时省略运行环境标志，以便 zig
+        构建从检测到的解释器解析运行环境，匹配 ``matrix.run_zig_build``。
         """
         seen = set()
         commands = []
@@ -171,31 +174,39 @@ class ZigPackageSpec(object):
         return commands
 
     def zig_build_command(self, python_version):
-        """Return a single ``zig build`` command (backward compat, first step)."""
+        """返回单个 ``zig build`` 命令（向后兼容，第一个步骤）。"""
         cmds = self.zig_build_commands(python_version)
         return cmds[0] if cmds else []
 
 
 def find_generated_extension(zig_lib_dir, extension_name):
-    """Locate the compiled extension file in *zig_lib_dir*."""
-    pattern = os.path.join(zig_lib_dir, "%s*" % extension_name)
-    for path in sorted(glob.glob(pattern)):
-        if path.endswith(".pyi") or os.path.isdir(path):
+    """在 *zig_lib_dir* 中定位已编译的扩展文件。
+
+    用 ``extension_name + "."`` 前缀匹配，避免 ``_foo`` 与 ``_foobar`` 碰撞。
+    """
+    prefix = extension_name + "."
+    for name in sorted(os.listdir(zig_lib_dir)):
+        if not name.startswith(prefix):
+            continue
+        path = os.path.join(zig_lib_dir, name)
+        if name.endswith(".pyi") or os.path.isdir(path):
             continue
         return path
-    raise RuntimeError("built extension not found")
+    raise PymzBuildError(
+        "built extension not found for %r in %s" % (extension_name, zig_lib_dir)
+    )
 
 
 def find_generated_stub(zig_lib_dir, extension_name):
-    """Locate the generated ``.pyi`` stub in *zig_lib_dir*."""
+    """在 *zig_lib_dir* 中定位生成的 ``.pyi`` 存根。不存在时返回 ``None``。"""
     stub_source = os.path.join(zig_lib_dir, "%s.pyi" % extension_name)
     if not os.path.exists(stub_source):
-        raise RuntimeError("generated stub not found")
+        return None
     return stub_source
 
 
 def sync_generated_artifacts(spec, build_lib, copy_to_source):
-    """Copy built extensions and stubs into setuptools' build_lib and optionally the source tree."""
+    """将构建的扩展和存根复制到 setuptools 的 build_lib 中，并可选择复制到源码树中。"""
     target_dirs = [os.path.join(build_lib, spec.package_name)]
     if copy_to_source:
         target_dirs.append(spec.python_package_dir)
@@ -204,98 +215,67 @@ def sync_generated_artifacts(spec, build_lib, copy_to_source):
         ensure_dir(target_dir)
         for mod_name in spec.extension_names:
             ext_source = find_generated_extension(spec.zig_lib_dir, mod_name)
-            stub_source = find_generated_stub(spec.zig_lib_dir, mod_name)
             shutil.copy2(ext_source, os.path.join(target_dir, os.path.basename(ext_source)))
-            shutil.copy2(stub_source, os.path.join(target_dir, "%s.pyi" % mod_name))
+            stub_source = find_generated_stub(spec.zig_lib_dir, mod_name)
+            if stub_source:
+                shutil.copy2(stub_source, os.path.join(target_dir, "%s.pyi" % mod_name))
 
 
-def _write_manifest(spec, build_lib):
-    """Write ``pymz-manifest.json`` next to the extensions in *build_lib*.
+def _run_zig_build(spec):
+    # type: (ZigPackageSpec) -> None
+    """为 *spec* 中的每个唯一步骤运行 ``zig build``。"""
+    for cmd in spec.zig_build_commands(python_version_string()):
+        try:
+            subprocess.check_call(cmd, cwd=spec.root)
+        except subprocess.CalledProcessError as exc:
+            raise PymzBuildError(
+                "zig build failed (exit %d): %s"
+                % (exc.returncode, " ".join(cmd))
+            )
 
-    This enables the runtime loader (``pymz_tool.loader``) to locate the
-    correct extension artifacts at import time.
+
+def _build_manifest_for_spec(spec, artifacts):
+    """从 *spec* 和收集的 *artifacts* 构建清单字典。
+
+    使用 ``resolve_runtime_for_manifest`` 将 ``"auto"`` 规范化为具体运行环境，
+    匹配 PEP 517 / 矩阵路径。
     """
-    artifacts = collect_artifacts(spec.zig_lib_dir, spec.extension_names)
-    if not artifacts:
-        return
-    manifest = build_manifest(
+    return build_manifest(
         modules=spec.extension_names,
         version=spec.version,
-        runtime=spec.runtime,
+        runtime=resolve_runtime_for_manifest(spec.runtime),
         distribution=spec.package_name,
         package_dir=spec.python_source_dir,
         artifacts=artifacts,
         python_versions=[python_version_string()],
         zig_target=spec.zig_step,
     )
+
+
+def _write_manifest(spec, build_lib):
+    """将 ``pymz-manifest.json`` 写入 *build_lib* 中扩展旁边。
+
+    这使得运行时加载器（``pymz_tool.loader``）可以在导入时定位正确的扩展产物。
+    """
+    artifacts = collect_artifacts(spec.zig_lib_dir, spec.extension_names)
+    if not artifacts:
+        return
+    manifest = _build_manifest_for_spec(spec, artifacts)
     pkg_dir = os.path.join(build_lib, spec.package_name)
     write_manifest(manifest, pkg_dir)
 
 
 def build_ext_class(spec):
-    """Create a setuptools ``build_ext`` command class that runs ``zig build``.
+    """创建一个运行 ``zig build`` 的 setuptools ``build_ext`` 命令类。
 
-    After building, extensions, stubs, and ``pymz-manifest.json`` are copied
-    into ``build_lib`` so that ``bdist_wheel`` produces a complete wheel.
-    Supports multi-module specs (runs each unique zig step once).
+    构建后，扩展、存根和 ``pymz-manifest.json`` 被复制到 ``build_lib`` 中，
+    以便 ``bdist_wheel`` 生成完整的 wheel。支持多模块规格（每个唯一 zig 步骤运行一次）。
     """
     class ZigBuildExt(build_ext_base):
         def run(self):
-            old_cwd = os.getcwd()
-            try:
-                os.chdir(spec.root)
-                for cmd in spec.zig_build_commands(python_version_string()):
-                    subprocess.check_call(cmd)
-                sync_generated_artifacts(spec, self.build_lib, self.inplace)
-                _write_manifest(spec, self.build_lib)
-                self.run_command("build_py")
-            finally:
-                os.chdir(old_cwd)
+            _run_zig_build(spec)
+            sync_generated_artifacts(spec, self.build_lib, self.inplace)
+            _write_manifest(spec, self.build_lib)
+            self.run_command("build_py")
 
     return ZigBuildExt
-
-
-def build_wheel_from_spec(spec, wheel_dir):
-    """Build a wheel directly from a ``ZigPackageSpec`` without setuptools' command system.
-
-    This is an alternative to ``python setup.py bdist_wheel`` for environments
-    where the ``wheel`` package is not installed.  It reuses the same wheel
-    packaging logic (``pymz_tool.wheel.build_wheel``) as the PEP 517 backend so
-    both paths produce byte-identical wheel layouts.
-
-    The ``_from_spec`` suffix distinguishes this helper (which takes a
-    ``ZigPackageSpec``) from the PEP 517 ``build_wheel`` hook (which takes the
-    standard ``(wheel_directory, config_settings, metadata_directory)`` tuple).
-    """
-    from .wheel import build_wheel as _build_wheel
-
-    ensure_dir(wheel_dir)
-
-    # Run zig build if not already built.
-    lib_dir = spec.zig_lib_dir
-    if not os.path.isdir(lib_dir):
-        old_cwd = os.getcwd()
-        try:
-            os.chdir(spec.root)
-            for cmd in spec.zig_build_commands(python_version_string()):
-                subprocess.check_call(cmd)
-        finally:
-            os.chdir(old_cwd)
-
-    artifacts = collect_artifacts(lib_dir, spec.extension_names)
-    if not any(a["kind"] == "extension" for a in artifacts):
-        raise RuntimeError("no extension artifact found in %s" % lib_dir)
-
-    manifest = build_manifest(
-        modules=spec.extension_names,
-        version=spec.version,
-        runtime=spec.runtime,
-        distribution=spec.package_name,
-        package_dir=spec.python_source_dir,
-        artifacts=artifacts,
-        python_versions=[python_version_string()],
-        zig_target=spec.zig_step,
-    )
-    write_manifest(manifest, lib_dir)
-
-    return _build_wheel(wheel_dir, manifest, lib_dir, spec.root)

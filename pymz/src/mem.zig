@@ -1,52 +1,53 @@
-//! Memory allocation and ownership conventions for pymz.
+//! pymz 的内存分配与所有权约定。
 //!
-//! By default pymz uses the C allocator so that allocations made on the Zig
-//! side can be freed by Python and vice versa.  Tests may override this via
-//! `setAllocator()` before creating Python objects.
+//! 默认情况下 pymz 使用 C 分配器，以便 Zig 侧的分配可被 Python 释放，
+//! 反之亦然。测试可在创建 Python 对象之前通过 `setAllocator()` 覆盖此行为。
 //!
-//! Ownership conventions used throughout pymz:
+//! pymz 中使用的所有权约定：
 //!
-//!   * `*Object` returned by a `pymz` helper (e.g. `pymz.string`,
-//!     `pymz.integer`) is a **new reference**.  The caller owns it and must
-//!     call `.decref()` when done, or transfer ownership back to Python.
+//!   * `pymz` 辅助函数返回的 `*Object`（如 `pymz.string`、`pymz.integer`）
+//!     为**新引用**。调用方拥有它，完成后必须调用 `.decref()`，或将其所有权
+//!     交还给 Python。
 //!
-//!   * `*Object` returned by `Object.newref()` is a **new reference** created
-//!     by incrementing the reference count of an existing object.
+//!   * `Object.newref()` 返回的 `*Object` 是通过递增现有对象引用计数创建的
+//!     **新引用**。
 //!
-//!   * `*Object` borrowed from a container (e.g. `Object.sequenceGet`,
-//!     `Dict.get`) is a **borrowed reference**.  It remains valid only as long
-//!     as the container is alive.  Do NOT call `.decref()` on a borrowed
-//!     reference unless you have explicitly incremented its refcount.
+//!   * 从容器的借用（如 `Object.sequenceGet`、`Dict.get`）得到的 `*Object`
+//!     为**借用引用**。它仅在容器存活期间有效。除非已显式递增引用计数，
+//!     否则不要对借用引用调用 `.decref()`。
 //!
-//!   * `[]const u8` extracted from a Python `str`/`bytes` by `fromPy` is a
-//!     **borrowed buffer**.  It points into the Python object's internal storage
-//!     and becomes invalid when that object is freed.  If the data must outlive
-//!     the Python object, copy it with the configured allocator.
+//!   * 通过 `fromPy` 从 Python `str`/`bytes` 提取的 `[]const u8` 为
+//!     **借用缓冲**。它指向 Python 对象的内部存储，在该对象被释放后失效。
+//!     如果数据需要比 Python 对象存活更久，使用配置的分配器拷贝。
 //!
-//!   * `[]u8` extracted from Python `bytes`/`bytearray` by `fromPy` is an
-//!     **owned copy**.  The caller must free it with `pymz.mem.allocator.free`
-//!     when done.
+//!   * 通过 `fromPy` 从 Python `bytes`/`bytearray` 提取的 `[]u8` 为
+//!     **拥有的拷贝**。调用方完成后必须使用 `pymz.mem.allocator.free` 释放。
 //!
-//!   * Zig struct fields that hold Python references must keep those objects
-//!     alive (e.g. by storing `*Object` and incrementing the refcount) and must
-//!     implement `__del__` or GC traversal to release them.
+//!   * 持有 Python 引用的 Zig struct 字段必须保持这些对象存活（例如通过
+//!     存储 `*Object` 并递增引用计数），并且必须实现 `__del__` 或 GC 遍历
+//!     来释放它们。
 
 const std = @import("std");
 
-/// The allocator used for all pymz-internal allocations.
+/// pymz 内部所有分配使用的分配器。
 ///
-/// Defaults to `std.heap.c_allocator`, which is required for CPython extension
-/// code because allocations made on the Zig side may be freed by Python (via
-/// `free()` from libc) and vice versa.
+/// 默认为 `std.heap.c_allocator`，这对 CPython 扩展代码是必需的，因为
+/// Zig 侧的分配可能被 Python 通过 libc 的 `free()` 释放，反之亦然。
 ///
-/// Tests can override this with a debug allocator (e.g.
-/// `std.heap.GeneralPurposeAllocator`) by calling `setAllocator()` at the
-/// start of the test runner. The allocator MUST be set before any Python
-/// objects are created and MUST NOT be changed afterwards.
+/// 测试可在测试运行器开始时调用 `setAllocator()` 覆盖为调试分配器（如
+/// `std.heap.GeneralPurposeAllocator`）。分配器必须在任何 Python 对象创建
+/// 之前设置，之后不得更改。
 pub var allocator: std.mem.Allocator = std.heap.c_allocator;
 
-/// Override the global allocator. Only makes sense at startup (e.g. in a test
-/// runner) before any pymz objects have been allocated.
+/// 在 `setAllocator` 被调用后设为 `true`。用于防止在分配开始后意外切换分配器。
+var allocator_set: bool = false;
+
+/// 覆盖全局分配器。仅在启动时（如测试运行器中）有意义，且在任何 pymz 对象
+/// 分配之前调用。多次调用此函数是编程错误，在调试构建中会 panic。
 pub fn setAllocator(alloc: std.mem.Allocator) void {
+    if (allocator_set) {
+        @panic("setAllocator must be called at most once, before any pymz allocations");
+    }
     allocator = alloc;
+    allocator_set = true;
 }

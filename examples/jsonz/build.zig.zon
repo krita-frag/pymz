@@ -2,7 +2,7 @@
     .name = .jsonz,
     .version = "0.1.0",
     .fingerprint = 0x640fc595d5a6977b,
-    .minimum_zig_version = "0.16.0-dev.2979+e93834410",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .@"pymz-tool" = .{ .path = "../../pymz-tool" },
         .pymz = .{ .path = "../../pymz" },

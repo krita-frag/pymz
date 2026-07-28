@@ -1,25 +1,32 @@
-"""Exception hierarchy for pymz-tool.
+"""pymz-tool 的异常层级。
 
-All pymz-tool build/configuration failures raise a ``PymzError`` subclass so
-callers (CLI, PEP 517 backend, tests) can distinguish pymz failures from
-generic ``RuntimeError``/``OSError`` without broad ``except Exception`` blocks.
+所有 pymz-tool 构建/配置失败抛出 ``PymzError`` 子类，以便
+调用者（CLI、PEP 517 后端、测试）可以区分 pymz 失败与
+通用 ``RuntimeError``/``OSError``，而无需使用宽泛的 ``except Exception`` 块。
 """
 from __future__ import absolute_import
 
 
 class PymzError(Exception):
-    """Base class for all pymz-tool failures."""
+    """所有 pymz-tool 失败的基类。"""
 
 
 class PymzConfigError(PymzError):
-    """Raised when project configuration (pymz.json/pyproject.toml) is invalid
-    or insufficient to describe a build (e.g. no modules declared)."""
+    """当项目配置（pymz.json/pyproject.toml）无效或不足以描述构建时抛出
+    （例如未声明模块）。"""
 
 
 class PymzBuildError(PymzError):
-    """Raised when a ``zig build`` invocation or artifact collection fails."""
+    """当 ``zig build`` 调用或产物收集失败时抛出。"""
 
 
 class PymzManifestError(PymzError):
-    """Raised when a build manifest cannot be written or is malformed at load
-    time."""
+    """当 ``pymz-manifest.json`` 的读写或校验失败时抛出。"""
+
+
+__all__ = [
+    "PymzError",
+    "PymzConfigError",
+    "PymzBuildError",
+    "PymzManifestError",
+]

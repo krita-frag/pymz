@@ -1,8 +1,7 @@
-//! Minimal backend mock used by the comptime-safe unit test runner.
+//! 编译期安全的单元测试运行器使用的最小后端模拟。
 //!
-//! This module satisfies `@import("pymz_backend")` for tests that do not link
-//! against a real Python interpreter. It reports a stable CPython 3.10 full-ABI
-//! spec so platform-agnostic declarative code can be exercised at test time.
+//! 该模块满足 `@import("pymz_backend")`，供不链接真实 Python 解释器的测试使用。
+//! 它报告稳定的 CPython 3.10 完整 ABI 规格，以便在测试时执行与平台无关的声明式代码。
 
 const contract = @import("contract");
 

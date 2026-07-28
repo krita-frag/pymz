@@ -1,4 +1,4 @@
-//! Exception export descriptors.
+//! 异常导出描述符。
 
 const std = @import("std");
 const common = @import("common.zig");
@@ -26,19 +26,17 @@ fn ExceptionDescriptor(
         pub const base = _base;
         pub const doc = _doc;
 
-        // `null` until `registerWithName` runs. The module-init path always
-        // registers descriptors before user code can reach `raise`, so the
-        // `assert` in `get` catches descriptor misuse (e.g. raising an
-        // exception whose owning module was never initialized) instead of
-        // silently dereferencing `undefined`.
+        // 在 registerWithName 运行之前为 null。模块初始化总是在用户代码调用 raise() 之前注册描述符，因此这里的 null 值表示编程错误（例如，抛出一个其所属模块从未初始化的异常）。
         pub var value: ?errors.Exception = null;
 
         inline fn get() errors.Exception {
-            std.debug.assert(value != null);
-            return value.?;
+            if (value) |v| return v;
+            @panic("exception used before registration; ensure the owning module is initialized");
         }
 
         pub fn registerWithName(mod: *types.Module, comptime export_name: [:0]const u8) Error!void {
+            // 忽略重复注册，防止泄漏之前的异常对象。
+            if (value != null) return;
             const created = try errors.createException(mod, export_name, base, doc);
             value = created;
         }

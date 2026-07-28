@@ -1,4 +1,4 @@
-//! Module export descriptors.
+//! 模块导出描述符。
 
 const std = @import("std");
 const common = @import("common.zig");

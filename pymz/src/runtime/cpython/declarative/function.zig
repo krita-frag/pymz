@@ -1,4 +1,4 @@
-//! Function export descriptors.
+//! 函数导出描述符。
 
 const common = @import("common.zig");
 const module_mod = @import("../module.zig");

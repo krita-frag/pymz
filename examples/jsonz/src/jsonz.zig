@@ -5,7 +5,7 @@ const v = py.value;
 const d = py.decl;
 
 // ============================================================================
-// jsonz — 一个可独立运行的 Zig JSON 扩展示例。
+// jsonz - 一个可独立运行的 Zig JSON 扩展示例。
 //
 // 提供比 Python 标准库更快的 JSON 解析与序列化，并展示 pymz 的常用 API。
 // ============================================================================
@@ -13,9 +13,6 @@ const d = py.decl;
 const gpa = std.heap.c_allocator;
 
 fn validateJsonLimitedImpl(text: []const u8) v.Result(bool) {
-    // Minimal structural validation for the limited/stable-ABI backend where
-    // `std.json` is not available. We verify that the text is non-empty,
-    // starts with a valid JSON token, and has balanced `[]`/`{}` nesting.
     if (text.len == 0) return false;
     var i: usize = 0;
     while (i < text.len and (text[i] == ' ' or text[i] == '\t' or text[i] == '\n' or text[i] == '\r')) : (i += 1) {}
@@ -147,7 +144,7 @@ fn appendPyJson(
         return appendSlice(allocator, out, "null");
     }
     if (obj.isBool()) {
-        return appendSlice(allocator, out, if (obj.asBool()) "true" else "false");
+        return appendSlice(allocator, out, if (try obj.asBool()) "true" else "false");
     }
     if (obj.isInt()) {
         const value = try obj.asInt(i64);
@@ -187,7 +184,9 @@ fn appendPySequenceJson(
     const len = try obj.sequenceLength();
     try appendSlice(allocator, out, "[");
     for (0..len) |index| {
-        const item = obj.sequenceGet(index).?;
+        const item = obj.sequenceGet(index) orelse {
+            return JsonError.raise("failed to access sequence element");
+        };
         if (index > 0) {
             try appendSlice(allocator, out, ",");
         }
@@ -213,9 +212,15 @@ fn appendPyDictJson(
     const len = try items.sequenceLength();
     try appendSlice(allocator, out, "{");
     for (0..len) |index| {
-        const pair = items.sequenceGet(index).?;
-        const key_obj = pair.sequenceGet(0).?;
-        const value_obj = pair.sequenceGet(1).?;
+        const pair = items.sequenceGet(index) orelse {
+            return JsonError.raise("failed to access dict item");
+        };
+        const key_obj = pair.sequenceGet(0) orelse {
+            return JsonError.raise("failed to access dict key");
+        };
+        const value_obj = pair.sequenceGet(1) orelse {
+            return JsonError.raise("failed to access dict value");
+        };
         if (!key_obj.isString()) {
             return JsonError.raise("JSON object keys must be strings");
         }
@@ -288,176 +293,14 @@ const echo_bytes = d.positionalFunction(echoBytesImpl, .{
     .limited = false,
 });
 
-const ProtocolDemoImpl = struct {
-    _data: []u8,
-
-    pub const __pymz_constructor_param_names__: []const []const u8 = &.{"text"};
-
-    pub fn __new__(text: []const u8) v.Result(ProtocolDemoImpl) {
-        const duped = gpa.dupe(u8, text) catch return error.OutOfMemory;
-        return .{ ._data = duped };
-    }
-
-    pub fn __del__(self: *ProtocolDemoImpl) void {
-        gpa.free(self._data);
-    }
-
-    pub fn __enter__(self: *ProtocolDemoImpl) *ProtocolDemoImpl {
-        return self;
-    }
-
-    pub fn __exit__(
-        self: *ProtocolDemoImpl,
-        exc_type: ?*v.Object,
-        exc_value: ?*v.Object,
-        exc_tb: ?*v.Object,
-    ) void {
-        _ = self;
-        _ = exc_type;
-        _ = exc_value;
-        _ = exc_tb;
-    }
-
-    pub fn __buffer__(self: *const ProtocolDemoImpl) []const u8 {
-        return self._data;
-    }
-};
-
-const ProtocolDemo = d.class(ProtocolDemoImpl, .{
-    .doc = "Context manager and byte buffer demo.",
-    .limited = false,
-});
-
-const MatrixBufferImpl = struct {
-    pub const shape = [_]usize{ 2, 2 };
-    pub const strides = [_]isize{ 2, 1 };
-
-    _data: [4]u8,
-
-    pub fn __new__() MatrixBufferImpl {
-        return .{ ._data = .{ 1, 2, 3, 4 } };
-    }
-
-    pub fn __buffer__(self: *const MatrixBufferImpl) v.Buffer {
-        return .{
-            .ptr = @ptrCast(@constCast(self._data[0..].ptr)),
-            .shape = MatrixBufferImpl.shape[0..],
-            .strides = MatrixBufferImpl.strides[0..],
-            .format = "B",
-            .readonly = true,
-        };
-    }
-};
-
-const MatrixBuffer = d.class(MatrixBufferImpl, .{
-    .doc = "A read-only 2x2 byte matrix.",
-    .limited = false,
-});
-
-const BaseCounterImpl = struct {
-    _count: i64,
-
-    pub fn __new__() BaseCounterImpl {
-        return .{ ._count = 0 };
-    }
-
-    pub fn increment(self: *BaseCounterImpl) i64 {
-        self._count += 1;
-        return self._count;
-    }
-};
-
-const BaseCounter = d.class(BaseCounterImpl, .{
-    .doc = "Counter that increments by one.",
-    .limited = false,
-});
-
-const BaseCounterDef = BaseCounter.classdefWithName("BaseCounter");
-
-const DerivedCounterImpl = struct {
-    _count: i64 = 0,
-    _step: i64,
-
-    pub const __pymz_constructor_param_names__: []const []const u8 = &.{"step"};
-
-    pub fn __new__(step: i64) DerivedCounterImpl {
-        return .{ ._count = 0, ._step = step };
-    }
-
-    pub fn increment(self: *DerivedCounterImpl) i64 {
-        self._count += self._step;
-        return self._count;
-    }
-};
-
-const DerivedCounter = d.classWithBase("DerivedCounter", DerivedCounterImpl, &BaseCounterDef, .{
-    .doc = "Counter that increments by a fixed step.",
-    .limited = false,
-});
-
-var gc_node_deallocs: usize = 0;
-
-const GCNodeImpl = struct {
-    _value: i64,
-    _child: ?*v.Object = null,
-
-    pub const __pymz_constructor_param_names__: []const []const u8 = &.{"value"};
-    pub const __pymz_method_param_names__ = .{ .set_child = "child" };
-
-    pub fn __new__(value: i64) GCNodeImpl {
-        return .{ ._value = value, ._child = null };
-    }
-
-    pub fn __del__(self: *GCNodeImpl) void {
-        _ = self;
-        gc_node_deallocs += 1;
-    }
-
-    pub fn set_child(self: *GCNodeImpl, child: ?*v.Object) void {
-        if (self._child) |old| {
-            old.decref();
-        }
-        self._child = if (child) |obj| obj.newref() else null;
-    }
-
-    pub fn __traverse__(
-        self: *const GCNodeImpl,
-        visit: *const fn (*v.Object, ?*anyopaque) callconv(.c) c_int,
-        arg: ?*anyopaque,
-    ) !void {
-        if (self._child) |child| {
-            if (visit(child, arg) != 0) return error.VisitFailed;
-        }
-    }
-
-    pub fn __clear__(self: *GCNodeImpl) !void {
-        if (self._child) |child| {
-            child.decref();
-            self._child = null;
-        }
-    }
-};
-
-const GCNode = d.class(GCNodeImpl, .{
-    .doc = "A GC-managed node with an optional child.",
-    .limited = false,
-});
-
-fn gcNodeDeallocCountImpl() usize {
-    return gc_node_deallocs;
-}
-
-const gc_node_dealloc_count = d.function(gcNodeDeallocCountImpl, .{
-    .doc = "Return the number of GCNode deallocations.",
-    .limited = false,
-});
-
 const JsonPathImpl = struct {
     _segments: std.ArrayList([]const u8),
     segment_count: usize,
 
-    pub const __pymz_readonly_fields__ = .{ .segment_count = true };
-    pub const __pymz_method_param_names__ = .{ .find = "root" };
+    pub const pymz_meta = d.classMeta(.{
+        .readonly_fields = .{ .segment_count = true },
+        .method_param_names = .{ .find = "root" },
+    });
 
     pub fn __repr__(self: *const JsonPathImpl) []const u8 {
         _ = self;
@@ -477,6 +320,11 @@ const JsonPathImpl = struct {
             segments.append(gpa, copy) catch return error.OutOfMemory;
         }
         return .{ ._segments = segments, .segment_count = segments.items.len };
+    }
+
+    pub fn __del__(self: *JsonPathImpl) void {
+        for (self._segments.items) |s| gpa.free(s);
+        self._segments.deinit(gpa);
     }
 
     pub fn find(self: *const JsonPathImpl, root: *v.Object) v.Result(*v.Object) {
@@ -514,12 +362,6 @@ pub const pymz_module = d.module("_jsonz", .{
     .dump_json = dump_json,
     .validate_json = validate_json,
     .echo_bytes = echo_bytes,
-    .ProtocolDemo = ProtocolDemo,
-    .MatrixBuffer = MatrixBuffer,
-    .BaseCounter = BaseCounter,
-    .DerivedCounter = DerivedCounter,
-    .GCNode = GCNode,
-    .gc_node_dealloc_count = gc_node_dealloc_count,
     .JsonError = JsonError,
     .JsonPath = JsonPath,
 }, null, "Fast, Zig-backed JSON utilities for Python.");

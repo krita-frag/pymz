@@ -1,4 +1,4 @@
-//! Constant export descriptors.
+//! 常量导出描述符。
 
 const common = @import("common.zig");
 const convert = @import("../convert.zig");

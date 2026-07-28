@@ -2,6 +2,7 @@ const std = @import("std");
 
 const example_dep_names: []const []const u8 = &.{
     "jsonz",
+    "showcase",
 };
 
 pub fn build(b: *std.Build) void {

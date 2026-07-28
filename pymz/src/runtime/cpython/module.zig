@@ -1,10 +1,9 @@
-//! Method definition and module initialization helpers.
+//! 方法定义和模块初始化辅助函数。
 //!
-//! This module provides both raw (`pyfn_varargs`, `RawArgs`) and typed
-//! (`pyfn_typed`, `pyfn_kw`, `Args(T)`) wrappers for turning Zig functions
-//! into Python-callable C callbacks. The typed wrappers automatically convert
-//! arguments and return values via the `convert` module, mirroring the ergonomics
-//! of PyO3 / PyOZ.
+//! 本模块提供原始（`pyfn_varargs`、`RawArgs`）和类型化（`pyfn_typed`、
+//! `pyfn_kw`、`Args(T)`）两种包装器，用于将 Zig 函数转换为 Python 可调用
+//! 的 C 回调。类型化包装器通过 `convert` 模块自动转换参数和返回值，模仿
+//! PyO3 / PyOZ 的易用性。
 
 const std = @import("std");
 const c = @import("python_c");
@@ -36,8 +35,8 @@ pub inline fn sentinel() MethodDef {
     return .{ .ml_name = null, .ml_meth = null, .ml_flags = 0, .ml_doc = null };
 }
 
-/// Build a PyMethodDef entry from a raw C-callback. The callback must match the
-/// selected flags (e.g. `fn (?*c.PyObject, ?*c.PyObject) callconv(.c) ?*c.PyObject`).
+/// 从原始 C 回调构建 PyMethodDef 条目。回调必须与所选标志匹配
+///（如 `fn (?*c.PyObject, ?*c.PyObject) callconv(.c) ?*c.PyObject`）。
 pub inline fn method(
     name: [:0]const u8,
     func: anytype,
@@ -51,9 +50,9 @@ pub inline fn method(
         .ml_doc = if (doc) |d| d else null,
     };
 }
-/// Wrapper for functions that need the full positional and keyword argument
-/// payload.  The Zig function receives a `RawArgs` where `kwargs` is non-null
-/// when the caller passed keyword arguments.
+/// 需要完整位置参数和关键字参数载荷的函数的包装器。
+/// Zig 函数接收一个 `RawArgs`，其中 `kwargs` 在调用方传递了关键字参数时
+/// 非空。
 pub inline fn pyfn_varargs(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject, ?*c.PyObject) callconv(.c) ?*c.PyObject {
     const S = struct {
         fn wrapper(_: ?*c.PyObject, py_args: ?*c.PyObject, py_kwargs: ?*c.PyObject) callconv(.c) ?*c.PyObject {
@@ -64,11 +63,11 @@ pub inline fn pyfn_varargs(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObjec
     };
     return S.wrapper;
 }
-/// Wrap a typed Zig function into a Python VARARGS callback.
+/// 将类型化的 Zig 函数包装为 Python VARARGS 回调。
 ///
-/// `func` may be e.g. `fn (i64, i64) Error!i64` or `fn (i64) i64` or
-/// `fn () void`. Each parameter is converted with `convert.fromPy` and the
-/// return value is converted with `convert.toPy` (or `null` on error).
+/// `func` 可以是例如 `fn (i64, i64) Error!i64` 或 `fn (i64) i64` 或
+/// `fn () void`。每个参数通过 `convert.fromPy` 转换，返回值通过
+/// `convert.toPy` 转换（出错时返回 `null`）。
 pub fn pyfn_typed(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject) callconv(.c) ?*c.PyObject {
     const Fn = @TypeOf(func);
     const fn_info = @typeInfo(Fn).@"fn";
@@ -95,13 +94,10 @@ pub fn pyfn_typed(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject) callco
                 const PT = param.type orelse @compileError("pyfn_typed: parameter has unknown type");
                 if (i < num_pos) {
                     const arg_label = comptime std.fmt.comptimePrint("{d}", .{i + 1});
-                    const converted = marshal.extractPositionalArg(PT, args_tuple.?, i, arg_label);
-                    if (converted) |value| {
-                        zig_args[i] = value;
-                    } else {
+                    zig_args[i] = marshal.extractPositionalArg(PT, args_tuple.?, i, arg_label) catch {
                         marshal.releaseArgsTuple(Fn, &zig_args, converted_count, 0);
                         return null;
-                    }
+                    };
                     converted_count += 1;
                 } else if (comptime @typeInfo(PT) == .optional) {
                     zig_args[i] = null;
@@ -119,8 +115,8 @@ pub fn pyfn_typed(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject) callco
     };
     return S.wrapper;
 }
-/// Wrap a typed Zig function into a Python VARARGS|KEYWORDS callback.
-/// Arguments may be passed positionally or by keyword using `param_names`.
+/// 将类型化的 Zig 函数包装为 Python VARARGS|KEYWORDS 回调。
+/// 参数可通过位置或关键字传递，使用 `param_names` 指定参数名。
 pub fn pyfn_mixed(comptime func: anytype, comptime param_names: ?[]const u8) fn (?*c.PyObject, ?*c.PyObject, ?*c.PyObject) callconv(.c) ?*c.PyObject {
     const Fn = @TypeOf(func);
     const fn_info = @typeInfo(Fn).@"fn";
@@ -148,26 +144,20 @@ pub fn pyfn_mixed(comptime func: anytype, comptime param_names: ?[]const u8) fn 
                 const PT = param.type orelse @compileError("pyfn_mixed: parameter has unknown type");
                 if (i < pos_count) {
                     const arg_label = comptime paramName(i);
-                    const converted = marshal.extractPositionalArg(PT, args_tuple.?, i, arg_label);
-                    if (converted) |value| {
-                        zig_args[i] = value;
-                    } else {
+                    zig_args[i] = marshal.extractPositionalArg(PT, args_tuple.?, i, arg_label) catch {
                         marshal.releaseArgsTuple(Fn, &zig_args, converted_count, 0);
                         return null;
-                    }
+                    };
                     converted_count += 1;
                 } else if (kwargs_dict) |kw| {
                     const name_z = comptime convert.toSentinelStr(paramName(i));
                     const name_ptr: [*c]const u8 = name_z.ptr;
                     if (c.PyDict_GetItemString(@ptrCast(kw), name_ptr)) |item| {
                         const py_item: *Object = @ptrCast(item);
-                        const converted = marshal.convertField(PT, py_item, comptime paramName(i));
-                        if (converted) |value| {
-                            zig_args[i] = value;
-                        } else {
+                        zig_args[i] = marshal.convertField(PT, py_item, comptime paramName(i)) catch {
                             marshal.releaseArgsTuple(Fn, &zig_args, converted_count, 0);
                             return null;
-                        }
+                        };
                         converted_count += 1;
                     } else if (comptime @typeInfo(PT) == .optional) {
                         zig_args[i] = null;
@@ -193,9 +183,9 @@ pub fn pyfn_mixed(comptime func: anytype, comptime param_names: ?[]const u8) fn 
     return S.wrapper;
 }
 
-/// Wrapper preamble shared by `pyfn_mixed` and `pyfn_kw`:
-/// extract args tuple, kwargs dict, and positional count; validate count and
-/// keyword names. Returns `null` on validation failure (Python error set).
+/// `pyfn_mixed` 和 `pyfn_kw` 共享的包装器前奏：
+/// 提取 args 元组、kwargs 字典和位置参数数量；验证数量和关键字名称。
+/// 验证失败时返回 `null`（Python 错误已设置）。
 fn extractArgs(
     py_args: ?*c.PyObject,
     py_kwargs: ?*c.PyObject,
@@ -223,9 +213,9 @@ fn extractArgs(
     return .{ .args = args_tuple, .kwargs = kwargs_dict, .pos = pos_count };
 }
 
-/// Typed wrapper for a function taking `Args(T)` where `T` is a struct.
-/// Fields of `T` become keyword argument names; optional fields default to
-/// `null`, and fields with `= value` defaults use those defaults.
+/// 接受 `Args(T)` 参数的函数的类型化包装器，其中 `T` 是一个结构体。
+/// `T` 的字段成为关键字参数名；可选字段默认为 `null`，带 `= value` 默认值
+/// 的字段使用这些默认值。
 pub fn pyfn_kw(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject, ?*c.PyObject) callconv(.c) ?*c.PyObject {
     const Fn = @TypeOf(func);
     const fn_info = @typeInfo(Fn).@"fn";
@@ -249,12 +239,10 @@ pub fn pyfn_kw(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject, ?*c.PyObj
     const Fields = InnerInfo.@"struct".fields;
 
     const S = struct {
-        // Per-field initialization flags. Tracking a contiguous prefix via a
-        // single counter is insufficient when fields are filled out of order
-        // (e.g. a default at index 0 followed by a keyword arg at index 1):
-        // doing so would skip releasing fields that were actually converted
-        // via `convert.fromPy`. We instead record exactly which fields have
-        // been assigned so the cleanup path can release precisely those.
+        // 每个字段的初始化标志。当字段按乱序填充时（如索引 0 有默认值，
+        // 索引 1 通过关键字参数提供），使用单个计数器跟踪连续前缀是不够的：
+        // 这样做会跳过释放实际通过 `convert.fromPy` 转换的字段。
+        // 我们改为精确记录哪些字段已被赋值，以便清理路径能精确释放它们。
         const InitFlags = [Fields.len]bool;
 
         fn releaseFields(value: *InnerT, init: *const InitFlags) void {
@@ -300,33 +288,27 @@ pub fn pyfn_kw(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject, ?*c.PyObj
                 const has_default = field.default_value_ptr != null;
 
                 if (i < pos_count) {
-                    // Positional argument
+                    // 位置参数
                     const py_item = args_tuple.?.get(i) orelse {
                         errors.typeError("missing positional argument {d}", .{i + 1});
                         releaseFields(&value, &initialized);
                         return null;
                     };
-                    const converted = marshal.convertField(field.type, py_item, field.name);
-                    if (converted) |v| {
-                        @field(value, field.name) = v;
-                    } else {
+                    @field(value, field.name) = marshal.convertField(field.type, py_item, field.name) catch {
                         releaseFields(&value, &initialized);
                         return null;
-                    }
+                    };
                     initialized[i] = true;
                 } else if (kwargs_dict) |kw| {
-                    // Try keyword argument by name
+                    // 按名称尝试关键字参数
                     const name_z = comptime convert.toSentinelStr(field.name);
                     const name_ptr: [*c]const u8 = name_z.ptr;
                     const py_item_opt: ?*Object = @ptrCast(c.PyDict_GetItemString(@ptrCast(kw), name_ptr));
                     if (py_item_opt) |py_item| {
-                        const converted = marshal.convertField(field.type, py_item, field.name);
-                        if (converted) |v| {
-                            @field(value, field.name) = v;
-                        } else {
+                        @field(value, field.name) = marshal.convertField(field.type, py_item, field.name) catch {
                             releaseFields(&value, &initialized);
                             return null;
-                        }
+                        };
                     } else if (has_default) {
                         @field(value, field.name) = field.defaultValue().?;
                     } else if (is_optional) {
@@ -359,7 +341,7 @@ pub fn pyfn_kw(comptime func: anytype) fn (?*c.PyObject, ?*c.PyObject, ?*c.PyObj
     return S.wrapper;
 }
 
-/// Runtime accessor for raw `*Tuple` / `*Dict` arguments. Used by `pyfn_varargs`.
+/// 原始 `*Tuple` / `*Dict` 参数的运行时访问器。由 `pyfn_varargs` 使用。
 pub const RawArgs = struct {
     args: *types.Tuple,
     kwargs: ?*types.Dict,
@@ -400,23 +382,23 @@ pub const RawArgs = struct {
         return @ptrCast(obj);
     }
 
-    /// Return true if any keyword arguments were supplied.
+    /// 如果提供了任何关键字参数则返回真。
     pub inline fn hasKwargs(self: RawArgs) bool {
         return self.kwargs != null and self.kwargs.?.length() > 0;
     }
 
-    /// Return the number of supplied keyword arguments.
+    /// 返回提供的关键字参数数量。
     pub inline fn kwLen(self: RawArgs) usize {
         return if (self.kwargs) |kw| kw.length() else 0;
     }
 
-    /// Borrowed reference to a keyword argument by name, or null if missing.
+    /// 按名称借用的关键字参数引用，缺失时返回 null。
     pub inline fn getKw(self: RawArgs, name: [:0]const u8) ?*Object {
         const kw = self.kwargs orelse return null;
         return kw.getItemString(name);
     }
 
-    /// Return a keyword argument by name, raising TypeError if it is missing.
+    /// 按名称返回关键字参数，缺失时抛出 TypeError。
     pub inline fn getKwObject(self: RawArgs, name: [:0]const u8) Error!*Object {
         if (self.getKw(name)) |o| return o;
         errors.typeError("missing required keyword argument: '{s}'", .{name});
@@ -424,7 +406,7 @@ pub const RawArgs = struct {
     }
 };
 
-/// Typed keyword-argument wrapper. Use with `pyfn_kw`:
+/// 类型化的关键字参数包装器。与 `pyfn_kw` 配合使用：
 ///
 /// ```zig
 /// const AddArgs = struct { a: i64, b: i64, c: ?i64 = null };
@@ -437,24 +419,35 @@ pub fn Args(comptime T: type) type {
     };
 }
 
-/// Module initialization callback signature accepted by `moduleInit`.
+/// `moduleInit` 接受的模块初始化回调签名。
 pub const ModuleInitFn = *const fn (mod: *types.Module) Error!void;
 
-/// Define a Python extension module. This macro exports the correct entry point
-/// for Python 2 (`init<name>`) or Python 3 (`PyInit_<name>`).
+/// 定义 Python 扩展模块。此宏为 Python 2（`init<name>`）或 Python 3
+///（`PyInit_<name>`）导出正确的入口点。
 ///
-/// On Python 3 this uses PEP 489 multi-phase initialization (`m_slots` +
-/// `PyModuleDef_Init`), giving proper sub-interpreter support. On Python 2
-/// the legacy `Py_InitModule` path is used.
+/// Python 3 上使用 PEP 489 多阶段初始化（`m_slots` + `PyModuleDef_Init`），
+/// 提供正确的子解释器支持。Python 2 上使用传统的 `Py_InitModule` 路径。
 pub fn moduleInit(comptime name: [:0]const u8, methods: [*c]MethodDef, init_fn: ?ModuleInitFn, comptime doc: ?[:0]const u8) type {
+    // 验证 Zig 翻译后的结构体布局是否与 CPython 期望的大小一致。
+    // 不匹配会导致字段未对齐和 PyModuleDef_Init 内部的段错误。
+    comptime std.debug.assert(@sizeOf(c.PyModuleDef_Slot) == @sizeOf(extern struct { slot: c_int, value: ?*anyopaque }));
+    // 验证 PyModuleDef_Base 和 m_size 的偏移。CPython 3.12 的 PyObject 为
+    // 16 bytes（union ob_refcnt + 指针 ob_type），PyModuleDef_Base 为 40 bytes
+    //（PyObject + m_init + m_index + m_copy）。m_size 在 m_base 之后第 3 个字段。
+    comptime std.debug.assert(@sizeOf(c.PyModuleDef_Base) == 40);
+    comptime std.debug.assert(@offsetOf(c.PyModuleDef, "m_size") == 56);
     const Initializer = if (version.is_py3) struct {
-        // PEP 489 multi-phase init: the module definition lives until the
-        // interpreter shuts down (Python holds a reference to the def object).
+        // PEP 489 多阶段初始化：模块定义在解释器关闭前一直存活
+        //（Python 持有 def 对象的引用）。
         var module_def: c.PyModuleDef = .{
-            .m_base = .{ .ob_base = std.mem.zeroes(c.PyObject), .m_init = null },
+            // 完全零初始化 m_base（PyModuleDef_Base）。CPython 的
+            // PyModuleDef_HEAD_INIT 会清零所有四个字段（ob_base、m_init、
+            // m_index、m_copy）；部分初始化导致 m_index / m_copy 未初始化
+            // 会在 3.12+ 的 PyModuleDef_Init 中引发段错误。
+            .m_base = std.mem.zeroes(c.PyModuleDef_Base),
             .m_name = name,
             .m_doc = if (doc) |d| d else null,
-            .m_size = -1,
+            .m_size = 1, // PEP 489 多阶段初始化要求 m_size >= 0；用 1 而非 0 避免部分 CPython 版本在 m_size=0 时的兼容性问题
             .m_methods = methods,
             .m_slots = &slots,
             .m_traverse = null,
@@ -462,43 +455,49 @@ pub fn moduleInit(comptime name: [:0]const u8, methods: [*c]MethodDef, init_fn: 
             .m_free = null,
         };
 
-        // Slots array: Py_mod_exec (slot=1) for the module population callback,
-        // terminated by {0, NULL} sentinel.
+        // Slots 数组：Py_mod_exec（slot=2）用于模块填充回调，
+        // 以 {0, NULL} 哨兵终止。
+        // PEP 489 定义：Py_mod_create=1（自定义模块对象创建），
+        // Py_mod_exec=2（模块填充）。我们使用 Py_mod_exec 让 CPython
+        // 负责创建模块对象，仅在 exec 回调中填充方法/类/常量。
         var slots = [_]c.PyModuleDef_Slot{
-            .{ .slot = 1, .value = @ptrCast(@constCast(&execFn)) },
+            .{ .slot = c.Py_mod_exec, .value = @ptrCast(@constCast(&execFn)) },
             .{ .slot = 0, .value = null },
         };
 
-        /// PEP 489 `Py_mod_exec` slot handler. Called by CPython after the
-        /// module object is created. Returns 0 on success, -1 on error (with
-        /// an active Python exception).
+        /// PEP 489 `Py_mod_exec` 槽位处理函数。由 CPython 在模块对象创建后调用。
+        /// 成功返回 0，失败返回 -1（需设置 Python 异常）。
         fn execFn(mod: ?*c.PyObject, _: c_int) callconv(.c) c_int {
             if (init_fn) |f| {
-                f(@ptrCast(mod.?)) catch {
+                const m = mod orelse return -1;
+                f(@ptrCast(m)) catch {
                     return -1;
                 };
             }
             return 0;
         }
 
-        /// PEP 489 init entry point: return the module definition via
-        /// `PyModuleDef_Init` (as opposed to `PyModule_Create`).
+        /// PEP 489 初始化入口点：通过 `PyModuleDef_Init`（而非 `PyModule_Create`）
+        /// 返回模块定义。
         fn init() callconv(.c) [*c]c.PyObject {
             return c.pymz_PyModuleDef_Init(&module_def);
         }
     } else struct {
         fn init() callconv(.c) void {
             const mod = c.Py_InitModule(name, methods) orelse return;
-            // Python 2's Py_InitModule does not take a docstring; set it as a
-            // module attribute instead.
+            // Python 2 的 Py_InitModule 不接受文档字符串；改为作为模块属性设置。
             if (doc) |d| {
-                _ = c.PyModule_AddStringConstant(mod, "__doc__", d);
+                // __doc__ setting failure does not affect module functionality.
+                // Clear any exception set by the failed call to avoid polluting
+                // subsequent operations.
+                if (c.PyModule_AddStringConstant(mod, "__doc__", d) < 0) {
+                    c.PyErr_Clear();
+                }
             }
             if (init_fn) |f| {
                 f(@ptrCast(mod)) catch {
-                    // Python 2 initializers return void, but the module is
-                    // still owned by the interpreter after Py_InitModule.
-                    // Leave the active exception intact and stop registration.
+                    // Python 2 初始化器返回 void，但模块在 Py_InitModule 后仍由
+                    // 解释器持有。保留活动的异常并停止注册。
                     return;
                 };
             }
