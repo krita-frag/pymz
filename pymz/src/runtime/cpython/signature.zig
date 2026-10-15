@@ -145,6 +145,7 @@ pub fn buildMlDocWithOptions(
 /// 从逗号分隔的字符串中提取第 N 个参数名。
 pub fn getParamName(comptime names_str: []const u8, comptime idx: usize) []const u8 {
     comptime {
+        @setEvalBranchQuota(20000);
         var current_idx: usize = 0;
         var start: usize = 0;
         var i: usize = 0;

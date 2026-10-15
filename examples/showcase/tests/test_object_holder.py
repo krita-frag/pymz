@@ -56,6 +56,30 @@ def test_object_holder_child_refcount():
     )
 
 
+def test_object_holder_get_child_owned_reference():
+    """get_child() must return an owned reference (CPython new-reference rule).
+
+    A method returning *Object / ?*Object hands its reference to the Python
+    caller. If get_child returned the holder's borrowed field reference, the
+    caller's decref would consume the holder's own reference; the later dealloc
+    of the holder would then decref the same (possibly freed) object again ->
+    double free / use-after-free. The returned reference must keep the child
+    alive even after the holder is deleted.
+    """
+    child = [7, 8]
+    holder = showcase.ObjectHolder(3, child)
+    ref_with_holder = sys.getrefcount(child)
+    result = holder.get_child()
+    # holder + result + getrefcount arg = ref_with_holder + 1
+    assert sys.getrefcount(child) == ref_with_holder + 1
+    del holder
+    gc.collect()
+    # result holds its own reference: the child survives the holder.
+    assert list(result) == [7, 8]
+    del result
+    gc.collect()
+
+
 def test_object_holder_dealloc():
     """Verify ObjectHolder is deallocated properly."""
     before = showcase.object_holder_dealloc_count()

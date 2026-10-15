@@ -114,7 +114,18 @@ fn ModuleDescriptor(
                     switch (Declaration.export_kind) {
                         .function => {},
                         .class => {
-                            const class_def = Declaration.classdefWithName(common.sentinelName(field.name));
+                            // 解析类名（Runtime 键名）：impl 声明了 `py_class` 时使用
+                            // `py_class.name`，使模块注册与 convert.instantiate（跨类返回）
+                            // 引用同一个 comptime 值。若此处用 sentinelName(field.name)
+                            // 拼接值而 instantiate 用字面量，Zig 对 `[:0]const u8` 泛型
+                            // 参数按指针身份记忆化，会生成两个不同的类型对象，导致
+                            // isinstance() 恒为 False。未声明 py_class 的类回退到字段名。
+                            const class_def = Declaration.classdefWithName(
+                                if (@hasDecl(Declaration.Impl, "py_class"))
+                                    Declaration.Impl.py_class.name
+                                else
+                                    common.sentinelName(field.name),
+                            );
                             try mod.addClass(class_def.name, class_def);
                         },
                         .exception => try Declaration.registerWithName(mod, common.sentinelName(field.name)),

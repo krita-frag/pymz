@@ -224,7 +224,8 @@ pub fn LifecycleBuilder(comptime T: type) type {
             inline for (fields) |field| {
                 if (comptime isPrivateField(field.name)) {
                     if (field.default_value_ptr) |dv| {
-                        @field(data_ptr.*, field.name) = dv.*;
+                        const typed_ptr: *const field.type = @ptrCast(@alignCast(dv));
+                        @field(data_ptr.*, field.name) = typed_ptr.*;
                     }
                 } else if (idx < num_pos) {
                     const py_item = args_tuple.?.get(idx) orelse {

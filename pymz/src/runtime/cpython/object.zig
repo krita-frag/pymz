@@ -245,6 +245,17 @@ pub const Object = extern struct {
         }
     }
 
+    /// 调用 Python callable。`args_tuple` 必须是元组（可为空元组）。
+    /// 返回**新引用**，调用方必须 `decref()`。失败时设置 Python 异常并返回
+    /// `error.PyError`。
+    pub inline fn call(self: *Object, args_tuple: *Object) Error!*Object {
+        errors.assertGILHeldByCurrentThread();
+        if (c.PyObject_CallObject(self.asPy(), args_tuple.asPy())) |result| {
+            return @ptrCast(result);
+        }
+        return error.PyError;
+    }
+
     pub inline fn getAttrString(self: *Object, name: [:0]const u8) Error!*Object {
         if (c.PyObject_GetAttrString(self.asPy(), name)) |r| {
             return @as(*Object, @ptrCast(r));

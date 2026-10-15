@@ -40,6 +40,14 @@ pub const Python = backend.Python;
 /// 详见 `py.zig` 顶部的 "GIL 约定" 章节和 `Python` 令牌类型的推荐用法文档。
 pub const GIL = backend.GIL;
 
+/// 转换原语命名空间（`convert.zig`）：`toPy`/`fromPy`/`instantiate`/`PyClass` 等。
+/// `instantiate` 用于跨类返回——把另一个 class 的 impl 值物化为对应 class 的
+/// Python 实例（见 `py/decl.zig` 中 `class` 的文档）。最常用的方式是声明式
+/// `py_class`：在 impl 类型上声明 `pub const py_class: PyClass = .{
+/// .descriptor = SomeClass, .name = "SomeClass" }`，返回该 impl 值的 method
+/// 即自动获得 `SomeClass` 实例，无需手写 `toPy`。
+pub const convert = backend.convert;
+
 pub fn none() *Object {
     return @ptrCast(backend.none());
 }

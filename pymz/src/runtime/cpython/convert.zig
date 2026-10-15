@@ -14,9 +14,30 @@ const errors = @import("errors.zig");
 const object = @import("object.zig");
 const types = @import("types.zig");
 const traits = @import("traits.zig");
+const class_builder = @import("class/class_builder.zig");
 const mem = @import("../../mem.zig");
 const Object = object.Object;
 const Error = errors.Error;
+
+/// impl 类型的跨类声明类型（`py_class` 字段）。
+///
+/// `descriptor` 是 `d.class(...)` / `d.classWithBase(...)` 返回的描述符类型；
+/// `name` 是类在模块中导出的属性名。**声明不变量**：声明类型必须就是
+/// `descriptor.Impl`（`validatePyClass` 在编译期校验）。`name` 是类的
+/// 唯一事实来源——`d.module` 注册时对声明了 `py_class` 的类使用
+/// `py_class.name` 作为导出名与 Runtime 键名（见 `declarative/module.zig`），
+/// 因此 `instantiate`/`extract` 与模块注册解析到同一类型对象，isinstance 恒真。
+/// `classWithBase` 类忽略 `name`——类名在声明时已固定。
+///
+/// 声明后，method 返回该 impl 值时由 `userToPy` 自动物化为对应 class 的
+/// Python 实例（见 `instantiate`），无需手写 `toPy`。这样既避免 `toPy` 被
+/// 方法表暴露为 Python 方法，也把"类名 + 描述符"的映射与 impl 定义放在一起。
+/// 反向同样成立：method 参数为 impl 类型时，`userFromPy` 从 class 实例
+/// 提取 impl 值（见 `extract`），与 `toPy`/`fromPy` 约定对称。
+pub const PyClass = struct {
+    descriptor: type,
+    name: [:0]const u8,
+};
 
 /// 正式转换 trait。类型可声明：
 ///
@@ -31,40 +52,77 @@ const Error = errors.Error;
 ///   pub fn fromPy(obj: *Object) Error!T { ... }
 ///
 /// 然后 `toPy`/`fromPy` 会自动使用它。两种约定可共存，`PymzConvert` 优先。
+///
+/// 第三种约定是 `py_class` 声明：impl 类型声明 `pub const py_class: PyClass = .{
+/// .descriptor = SomeClass, .name = "SomeClass" }`，返回该 impl 值的 method
+/// 会自动物化为对应 class 的 Python 实例（见 `instantiate`）。它适合"impl 值
+/// 就是某个已声明 class 的句柄/载荷"的跨类返回场景，且不会像 `toPy` 那样被
+/// 方法表暴露为 Python 方法。
+///
 /// Check if type T has a user-defined conversion, either via `PymzConvert`
-/// or via direct `toPy`/`fromPy` declarations. Only container types can
+/// or via direct `toPy`/`py_class` declarations. Only container types can
 /// have declarations; non-container types always return false.
 pub fn hasUserToPy(comptime T: type) bool {
     return switch (@typeInfo(T)) {
-        .@"struct", .@"union", .@"enum" => @hasDecl(T, "PymzConvert") or @hasDecl(T, "toPy"),
+        .@"struct", .@"union", .@"enum" => @hasDecl(T, "PymzConvert") or
+            @hasDecl(T, "toPy") or
+            @hasDecl(T, "py_class"),
         else => false,
     };
 }
 
 pub fn hasUserFromPy(comptime T: type) bool {
     return switch (@typeInfo(T)) {
-        .@"struct", .@"union", .@"enum" => @hasDecl(T, "PymzConvert") or @hasDecl(T, "fromPy"),
+        .@"struct", .@"union", .@"enum" => @hasDecl(T, "PymzConvert") or
+            @hasDecl(T, "fromPy") or
+            @hasDecl(T, "py_class"),
         else => false,
     };
 }
 
-/// Dispatch to the user's toPy conversion. PymzConvert.intoPy takes precedence
-/// over direct `pub fn toPy`.
+/// 编译期校验 `py_class` 声明的一致性：声明类型必须就是描述符的 Impl。
+/// `hasUserToPy`/`hasUserFromPy` 在检测到 `py_class` 后调用 `userToPy`/`userFromPy`，
+/// 此处防御性断言可捕获"把 py_class 挂在无关类型上"的声明错误。
+fn validatePyClass(comptime T: type) void {
+    comptime {
+        if (T != T.py_class.descriptor.Impl) {
+            @compileError("py_class: " ++ @typeName(T) ++ " is not the Impl of descriptor " ++ @typeName(T.py_class.descriptor));
+        }
+    }
+}
+
+/// Dispatch to the user's toPy conversion. Precedence: `PymzConvert.intoPy`
+/// > direct `pub fn toPy` > declarative `pub const py_class`.
 pub inline fn userToPy(value: anytype) Error!*Object {
     const T = @TypeOf(value);
     if (comptime @hasDecl(T, "PymzConvert")) {
         return T.PymzConvert.intoPy(value);
     }
-    return @field(T, "toPy")(value);
+    if (comptime @hasDecl(T, "toPy")) {
+        return @field(T, "toPy")(value);
+    }
+    if (comptime @hasDecl(T, "py_class")) {
+        validatePyClass(T);
+        return instantiate(T.py_class.descriptor, T.py_class.name, value);
+    }
+    unreachable; // hasUserToPy 保证到达此处时至少有一个分支存在
 }
 
 /// Dispatch to the user's fromPy conversion. PymzConvert.fromPy takes precedence
-/// over direct `pub fn fromPy`.
+/// over direct `pub fn fromPy`; `py_class` handles class instance → impl value
+/// extraction (the symmetric inverse of `instantiate`).
 pub inline fn userFromPy(comptime T: type, obj: *Object) Error!T {
     if (comptime @hasDecl(T, "PymzConvert")) {
         return T.PymzConvert.fromPy(obj);
     }
-    return @field(T, "fromPy")(obj);
+    if (comptime @hasDecl(T, "fromPy")) {
+        return @field(T, "fromPy")(obj);
+    }
+    if (comptime @hasDecl(T, "py_class")) {
+        validatePyClass(T);
+        return extract(T.py_class.descriptor, T.py_class.name, obj);
+    }
+    unreachable; // hasUserFromPy 保证到达此处时至少有一个分支存在
 }
 
 pub fn isOwnedBytes(comptime T: type) bool {
@@ -536,6 +594,63 @@ pub fn releaseStructFields(value: anytype, count: usize) void {
             releaseValue(&@field(value, field.name));
         }
     }
+}
+
+/// 将某个 class 的 impl 值直接物化为该 class 的 Python 实例（跨类返回）。
+///
+/// `Class` 是 `d.class(...)` / `d.classWithBase(...)` 返回的描述符类型；
+/// `export_name` 是类在模块中导出的字段名（`classWithBase` 类可传任意值，
+/// 类名在声明时已固定）。`value` 是 impl 结构体值。
+///
+/// 实现通过类型对象直接分配实例并拷贝 impl 值，绕过 `__init__`/`__new__`：
+/// 因此本函数对任何 impl 结构体通用，不依赖类的构造器签名。物化出的实例
+/// 拥有与 `value` 相同的字段（如"句柄 + 所有权标志"），由类的 `__del__`
+/// 负责释放资源。
+///
+/// 典型用法是配合 `py_class` 声明：method 返回 impl 值时 `userToPy` 自动
+/// 调用本函数。也可在 `toPy` / `PymzConvert.intoPy` 中手动调用。
+/// 返回新引用；转换管道负责 decref。
+pub fn instantiate(
+    comptime Class: type,
+    comptime export_name: [:0]const u8,
+    value: anytype,
+) Error!*Object {
+    errors.assertGILHeldByCurrentThread();
+    const T = @TypeOf(value);
+    const classdef = Class.classdefWithName(export_name);
+    const type_obj = classdef.getTypeObject() orelse return error.PyError;
+    const obj = c.PyType_GenericNew(@ptrCast(type_obj), null, null) orelse return error.PyError;
+    const wrapper: *class_builder.Wrapper(T) = @ptrCast(@alignCast(obj));
+    wrapper.initialized = true;
+    wrapper.getData().* = value;
+    return @ptrCast(obj);
+}
+
+/// `instantiate` 的逆操作：从 class 实例提取 impl 值（`py_class` 的 fromPy 方向）。
+///
+/// 校验 `obj` 的类型确实是 `Class.classdefWithName(export_name)` 解析出的
+/// class（与 `instantiate` 同一 Runtime 键名），然后按值拷贝 `Wrapper(T)` 中
+/// 的 impl 载荷。调用方获得 impl 的按值拷贝；class 实例仍持有自己的那份，
+/// 生命周期不变（对"句柄 + 所有权标志"这类 impl 是零拷贝语义）。
+pub fn extract(
+    comptime Class: type,
+    comptime export_name: [:0]const u8,
+    obj: *Object,
+) Error!Class.Impl {
+    errors.assertGILHeldByCurrentThread();
+    const T = Class.Impl;
+    const classdef = Class.classdefWithName(export_name);
+    const type_obj = classdef.getTypeObject() orelse return error.PyError;
+    if (c.PyObject_TypeCheck(obj.asPy(), @ptrCast(type_obj)) == 0) {
+        errors.typeError("expected {s}, got {s}", .{ classdef.name, pyTypeName(obj) });
+        return error.PyError;
+    }
+    const wrapper: *class_builder.Wrapper(T) = @ptrCast(@alignCast(obj.asPy()));
+    if (!wrapper.initialized) {
+        errors.runtimeError("uninitialized {s} instance", .{classdef.name});
+        return error.PyError;
+    }
+    return wrapper.getData().*;
 }
 
 pub fn listToArrayList(comptime T: type, list: *types.List) Error!std.ArrayList(T) {

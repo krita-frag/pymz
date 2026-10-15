@@ -415,3 +415,54 @@ def test_showcase_error_can_be_raised_and_caught():
 def test_showcase_error_caught_as_runtime_error():
     with pytest.raises(RuntimeError):
         raise showcase.ShowcaseError("test error")
+
+
+# ============================================================================
+# Handle / Registry - py_class declarative cross-class conversion.
+# ============================================================================
+
+def test_py_class_cross_return_isinstance():
+    reg = showcase.Registry()
+    handle = reg.make(42)
+    assert isinstance(handle, showcase.Handle)
+
+
+def test_py_class_cross_return_type_identity():
+    # 返回的实例类型必须与模块导出的类是同一类型对象（isinstance 恒真的根因：
+    # module 注册与 convert.instantiate 使用同一个 py_class.name comptime 键）。
+    reg = showcase.Registry()
+    handle = reg.make(42)
+    assert type(handle) is showcase.Handle
+
+
+def test_py_class_cross_return_value():
+    reg = showcase.Registry()
+    assert reg.make(42).get_value() == 42
+    assert reg.make(-1).get_value() == -1
+
+
+def test_py_class_direct_construction():
+    # 直接构造仍然走 __new__，与跨类返回物化（绕过 __new__ 直接拷贝载荷）共存。
+    handle = showcase.Handle(7)
+    assert handle.get_value() == 7
+
+
+def test_py_class_extract_parameter():
+    # 反向方向：参数为 HandleImpl，pymz 从 Handle 实例提取载荷后调用。
+    reg = showcase.Registry()
+    assert reg.add(showcase.Handle(10), showcase.Handle(32)) == 42
+    assert reg.add(reg.make(1), reg.make(2)) == 3
+
+
+def test_py_class_not_exposed_as_method():
+    # py_class 的动机之一：`toPy` 若声明为普通方法会被方法表暴露，py_class 不会。
+    handle = showcase.Registry().make(1)
+    assert not hasattr(handle, "toPy")
+    assert not hasattr(showcase.Handle, "toPy")
+    assert not hasattr(showcase.Handle, "py_class")
+
+
+def test_py_class_instance_is_readonly():
+    handle = showcase.Handle(5)
+    with pytest.raises(AttributeError):
+        handle._value = 99

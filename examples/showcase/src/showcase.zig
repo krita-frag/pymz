@@ -433,7 +433,12 @@ const ObjectHolderImpl = struct {
     }
 
     pub fn get_child(self: *const ObjectHolderImpl) ?*v.Object {
-        return self.child;
+        // 返回 `*Object` / `?*Object` 的方法必须返回 owned（新）引用：
+        // handlePayload 会把该引用转移给 Python 调用方。直接返回字段的
+        // 借用引用会把 holder 持有的引用转移出去，导致 Python 端 decref
+        // 与析构时的 cleanupFields 双重释放。返回字段时用 `.newref()`。
+        if (self.child) |child| return child.newref();
+        return null;
     }
 };
 
@@ -448,6 +453,57 @@ fn objectHolderDeallocCountImpl() usize {
 
 const object_holder_dealloc_count = d.function(objectHolderDeallocCountImpl, .{
     .doc = "Return the number of ObjectHolder deallocations.",
+    .limited = false,
+});
+
+// ── Handle / Registry: py_class 跨类返回 ─────────────────────────────────
+// HandleImpl 声明 `py_class`：Registry.make() 返回的 HandleImpl 值会被 pymz
+// 自动物化为 `Handle` class 实例（无需手写 toPy，也避免 toPy 被方法表暴露）；
+// Registry.add() 的参数为 HandleImpl，pymz 从传入的 `Handle` 实例提取载荷
+// （fromPy 对称方向）。`py_class.name` 是类的唯一事实来源，必须与模块导出键
+// 一致（本示例中均为 "Handle"）。
+
+const HandleImpl = struct {
+    _value: i64,
+
+    pub const pymz_meta = d.classMeta(.{
+        .readonly_fields = .{ ._value = true },
+        .method_param_names = .{ .__new__ = "value" },
+    });
+
+    /// 跨类返回声明：任何返回 HandleImpl 的 method 自动物化为 Handle 实例。
+    pub const py_class: v.convert.PyClass = .{ .descriptor = Handle, .name = "Handle" };
+
+    pub fn __new__(value: i64) HandleImpl {
+        return .{ ._value = value };
+    }
+
+    pub fn get_value(self: *const HandleImpl) i64 {
+        return self._value;
+    }
+};
+
+const Handle = d.class(HandleImpl, .{
+    .doc = "A value handle demonstrating py_class cross-class return.",
+    .limited = false,
+});
+
+const RegistryImpl = struct {
+    /// 跨类返回：返回 HandleImpl，pymz 自动物化为 Handle 实例。
+    pub fn make(self: *RegistryImpl, value: i64) HandleImpl {
+        _ = self;
+        return .{ ._value = value };
+    }
+
+    /// 跨类入参：参数为 HandleImpl，pymz 从 Handle 实例提取载荷后传入。
+    pub fn add(self: *RegistryImpl, a: HandleImpl, b: HandleImpl) i64 {
+        _ = self;
+        return a._value + b._value;
+    }
+};
+
+const Registry = d.class(RegistryImpl, .{
+    .doc = "A registry whose methods cross classes via py_class.",
     .limited = false,
 });
 
@@ -573,6 +629,8 @@ pub const pymz_module = d.module("_showcase", .{
     .IntVecError = IntVecError,
     .ObjectHolder = ObjectHolder,
     .object_holder_dealloc_count = object_holder_dealloc_count,
+    .Handle = Handle,
+    .Registry = Registry,
     .sum_all = sum_all,
     .make_containers = make_containers,
     .ShowcaseError = ShowcaseError,

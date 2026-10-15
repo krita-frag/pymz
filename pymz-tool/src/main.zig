@@ -8,6 +8,7 @@
 //! 实现细节位于同级模块中；此文件是公共入口点，负责编排 `buildProject`。
 
 const std = @import("std");
+const builtin = @import("builtin");
 const python_config = @import("python_config.zig");
 const extension = @import("extension.zig");
 const cross = @import("cross.zig");
@@ -81,7 +82,11 @@ pub fn buildProject(
     b: *std.Build,
     options: ProjectOptions,
 ) BuildProjectError!?*std.Build.Step.Compile {
-    const target = b.standardTargetOptions(.{});
+    // Windows 默认 native 目标为 x86_64-windows-gnu（需 MinGW CRT），与部署的
+    // CPython/Conan 构建不一致；默认用 msvc ABI，显式 `-Dtarget=...` 优先。
+    const target = b.standardTargetOptions(.{
+        .default_target = if (builtin.os.tag == .windows) .{ .abi = .msvc } else .{},
+    });
     const optimize = b.standardOptimizeOption(.{});
     const requested_runtime_raw = b.option(
         []const u8,

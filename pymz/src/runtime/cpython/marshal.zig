@@ -210,9 +210,21 @@ pub fn handleReturn(comptime RT: type, result: RT) ?*c.PyObject {
 /// 在 `toPy` 将包装器产生的值转换为 Python 对象后，释放其所有权。
 ///
 /// 返回 `*Object` / `*c.PyObject` 的 Zig 函数遵循 CPython 返回值约定：
-/// 它们返回一个新引用。`toPy` 已经 incref 产生了 Python 端的新引用，因此
-/// 在此 decref 原始值以避免泄漏。包装器返回的可变 `[]u8` 切片通过
-/// `convert.releaseValue` 释放。
+/// **必须返回一个 owned（新）引用**。`handlePayload` 先 `toPy` incref 产生
+/// Python 端的新引用，再在此 decref 原始引用，净效果是把方法返回的引用转移
+/// 给 Python 调用方。
+///
+/// 因此：
+///   - 方法内新建的对象（`v.dict()`、`v.list()` 等）可直接 `return`——它的
+///     新引用就是被转移的那个。
+///   - 方法返回自有字段时（如 `self.child`）**必须**先 `.newref()`：直接返回
+///     借用引用会把 wrapper 字段持有的引用转移出去，Python 调用方 decref 时
+///     消费的正是持有者那份，随后析构的 `cleanupFields` 再 decref 同一引用，
+///     造成双重释放/use-after-free。
+/// 参见 examples/jsonz 的 `JsonPath.find`（`return current.newref()`）与
+/// examples/showcase 的 `ObjectHolder.get_child`。
+///
+/// 包装器返回的可变 `[]u8` 切片通过 `convert.releaseValue` 释放。
 fn releaseReturnedValue(value: anytype) void {
     const T = @TypeOf(value);
     switch (@typeInfo(T)) {

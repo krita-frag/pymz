@@ -151,13 +151,13 @@ pub const Bool = extern struct {
     /// 创建 `True` 或 `False` 的新引用。与 `Int.from` 和 `Float.from` 类似，
     /// 调用方拥有返回的引用，必须 decref（或转移所有权给 Python）。
     pub inline fn from(value: bool) *Bool {
-        const obj = if (value) c.Py_True else c.Py_False;
+        const obj = if (value) c.pymz_Py_True() else c.pymz_Py_False();
         c.pymz_Py_INCREF(obj);
         return @ptrCast(obj);
     }
 
     pub inline fn as(self: *Bool) bool {
-        return @intFromPtr(self) == @intFromPtr(c.Py_True);
+        return @intFromPtr(self) == @intFromPtr(c.pymz_Py_True());
     }
 };
 
